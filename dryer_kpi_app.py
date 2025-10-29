@@ -59,7 +59,7 @@ st.write("Upload your **Energy** and **Hordenwagen** Excel files to visualize en
 
 # ------------------ Sidebar ------------------
 with st.sidebar:
-    st.image("https://upload.wikimedia.org/wikipedia/commons/2/27/Lindner_Group_logo.svg", use_column_width=True)
+    st.image("https://www.google.com/url?sa=i&url=https%3A%2F%2Fde.wikipedia.org%2Fwiki%2FDatei%3ALindner_logo.svg&psig=AOvVaw1nxdBN1PzG87N6KKinWnJk&ust=1761867538970000&source=images&cd=vfe&opi=89978449&ved=0CBUQjRxqFwoTCKDCk5jKypADFQAAAAAdAAAAABAE", use_column_width=True)
     st.markdown("---")
     energy_file = st.file_uploader("📊 Upload Energy File (.xlsx)", type=["xlsx"])
     wagon_file = st.file_uploader("🚛 Upload Hordenwagen File (.xlsm, .xlsx)", type=["xlsm", "xlsx"])
@@ -139,3 +139,4 @@ if run_button:
                 )
 
             st.success("✅ KPI Analysis complete. Use the charts above to explore efficiency trends.")
+
