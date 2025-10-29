@@ -7,7 +7,7 @@ from dryer_kpi_monthly_final import main as run_kpi, CONFIG
 # ------------------ Page Configuration ------------------
 st.set_page_config(
     page_title="Lindner Dryer KPI Dashboard",
-    page_icon="🔥",
+    page_icon="",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -139,5 +139,6 @@ if run_button:
                 )
 
             st.success("✅ KPI Analysis complete. Use the charts above to explore efficiency trends.")
+
 
 
