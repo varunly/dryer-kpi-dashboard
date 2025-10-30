@@ -5,20 +5,16 @@ import plotly.express as px
 import plotly.graph_objects as go
 from pathlib import Path
 import sys
-import os
 
 # Import the KPI calculation module
 try:
     from dryer_kpi_monthly_final import (
-        parse_energy,
-        parse_wagon,
-        explode_intervals,
-        allocate_energy,
-        CONFIG
+        parse_energy, parse_wagon, explode_intervals, 
+        allocate_energy, CONFIG
     )
-except ImportError as e:
-    print("Module import failed:", e)
-
+except ImportError:
+    st.error("❌ Unable to import dryer_kpi_monthly_final module")
+    st.stop()
 
 # ------------------ Page Configuration ------------------
 st.set_page_config(
@@ -374,5 +370,3 @@ if run_button:
             st.error(f"❌ An error occurred during analysis: {str(e)}")
             with st.expander("🔍 View Error Details"):
                 st.exception(e)
-
-
