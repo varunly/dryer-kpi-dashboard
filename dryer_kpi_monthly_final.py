@@ -58,19 +58,48 @@ def parse_wagon(df):
                  "In Z2","In Z3","In Z4","In Z5",
                  "Zeit in Z1","Zeit in Z2","Zeit in Z3","Zeit in Z4","Zeit in Z5"]
     df = df[[c for c in keep_cols if c in df.columns]].copy()
+      # Volume handling
     if "m³" in df.columns:
         df["m3"] = df["m³"]
     else:
         df["m3"] = 0.605 * 0.605 * (df["Stärke"].astype(float) + 7) / 1000
-    for z in ["Z2","Z3","Z4","Z5"]:
-        if f"In {z}" in df.columns:
-            df[f"{z}_in"] = pd.to_datetime(df[f"In {z}"], errors="coerce")
-    for z in ["Z1","Z2","Z3","Z4","Z5"]:
+
+    # --- Convert all zone entry timestamps properly ---
+    for z in ["Z2", "Z3", "Z4", "Z5"]:
+        col = f"In {z}"
+        if col in df.columns:
+            df[f"{z}_in"] = pd.to_datetime(df[col], errors="coerce")
+        else:
+            df[f"{z}_in"] = pd.NaT
+
+    # --- Add Z1 entry time (dryer start time) ---
+    df["Z1_in"] = df["t0"]
+
+    # --- Ensure exit (Entnahme-Zeit) column exists for last zone ---
+    if "Entnahme-Zeit" in df.columns:
+        df["Entnahme-Zeit"] = pd.to_datetime(df["Entnahme-Zeit"], errors="coerce")
+    else:
+        df["Entnahme-Zeit"] = pd.NaT
+
+    # --- Calculate zone durations automatically ---
+    df["Z1_dur_calc"] = (df["In Z2"] - df["t0"]).dt.total_seconds() / 3600
+    df["Z2_dur_calc"] = (df["In Z3"] - df["In Z2"]).dt.total_seconds() / 3600
+    df["Z3_dur_calc"] = (df["In Z4"] - df["In Z3"]).dt.total_seconds() / 3600
+    df["Z4_dur_calc"] = (df["In Z5"] - df["In Z4"]).dt.total_seconds() / 3600
+    df["Z5_dur_calc"] = (df["Entnahme-Zeit"] - df["In Z5"]).dt.total_seconds() / 3600
+
+    # --- Use calculated durations if they make sense, else fallback ---
+    for z in ["Z1", "Z2", "Z3", "Z4", "Z5"]:
         if f"Zeit in {z}" in df.columns:
             df[f"{z}_dur"] = parse_duration_series(df[f"Zeit in {z}"])
+            # replace 1-hour placeholders with calculated durations when valid
+            df.loc[df[f"{z}_dur"].isna() | (df[f"{z}_dur"].dt.total_seconds() / 3600 < 1), f"{z}_dur"] = pd.to_timedelta(df[f"{z}_dur_calc"], unit="h")
+        else:
+            df[f"{z}_dur"] = pd.to_timedelta(df[f"{z}_dur_calc"], unit="h")
+
     df["Month"] = df["t0"].dt.month
-    df["Z1_in"] = df["t0"]
     return df
+
 
 def build_intervals(row):
     intervals = []
@@ -199,3 +228,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
