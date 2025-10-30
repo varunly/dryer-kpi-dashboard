@@ -7,12 +7,12 @@ from dryer_kpi_monthly_final import main as run_kpi, CONFIG
 # ------------------ Page Configuration ------------------
 st.set_page_config(
     page_title="Lindner Dryer KPI Dashboard",
-    page_icon="",
+    page_icon="🏭", # Added a relevant icon
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# ------------------ Custom CSS ------------------
+# ------------------ Custom CSS (UPDATED FOR REALISM) ------------------
 st.markdown("""
     <style>
     /* Main background and font */
@@ -36,18 +36,33 @@ st.markdown("""
         font-size: 22px;
         font-weight: 600;
         margin-top: 40px;
-        border-bottom: 2px solid #003366;
+        border-bottom: 2px solid #005691;
         padding-bottom: 6px;
     }
 
-    /* KPI cards */
+    /* KPI cards (UPDATED) */
     .metric-card {
         background-color: white;
         padding: 20px;
         border-radius: 10px;
         text-align: center;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.1);
-        border-left: 6px solid #0078d4;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.05); 
+        border-top: 5px solid #005691; 
+        transition: transform 0.2s;
+        margin-bottom: 10px;
+    }
+    .metric-card:hover {
+        transform: translateY(-3px);
+    }
+    .metric-card h3 {
+        color: #555555;
+        font-size: 16px;
+        margin-bottom: 5px;
+    }
+    .metric-card h2 {
+        color: #003366;
+        font-size: 32px;
+        margin: 0;
     }
     </style>
 """, unsafe_allow_html=True)
@@ -101,24 +116,47 @@ if run_button:
             total_volume = yearly["Volume_m3"].sum()
 
             col1, col2, col3 = st.columns(3)
-            col1.markdown(f'<div class="metric-card"><h3>Total Energy</h3><h2>{total_energy:,.0f} kWh</h2></div>', unsafe_allow_html=True)
-            col2.markdown(f'<div class="metric-card"><h3>Avg. KPI</h3><h2>{avg_kpi:,.2f} kWh/m³</h2></div>', unsafe_allow_html=True)
-            col3.markdown(f'<div class="metric-card"><h3>Total Volume</h3><h2>{total_volume:,.0f} m³</h2></div>', unsafe_allow_html=True)
+            col1.markdown(f'<div class="metric-card"><h3>Total Energy Consumed</h3><h2>{total_energy:,.0f} kWh</h2></div>', unsafe_allow_html=True)
+            col2.markdown(f'<div class="metric-card"><h3>Avg. Energy Efficiency</h3><h2>{avg_kpi:,.2f} kWh/m³</h2></div>', unsafe_allow_html=True)
+            col3.markdown(f'<div class="metric-card"><h3>Total Volume Processed</h3><h2>{total_volume:,.0f} m³</h2></div>', unsafe_allow_html=True)
 
             # --------------- Charts ---------------
-            st.markdown('<div class="section-header">📊 Monthly KPI (kWh/m³)</div>', unsafe_allow_html=True)
-            fig1 = px.bar(
-                summary,
-                x="Month", y="kWh_per_m3", color="Zone",
-                barmode="group",
-                hover_data=["Produkt", "Energy_kWh", "Volume_m3"],
-                color_discrete_sequence=px.colors.sequential.Blues_r,
-                title=""
-            )
-            fig1.update_layout(height=500, xaxis_title="Month", yaxis_title="kWh/m³", plot_bgcolor="white")
-            st.plotly_chart(fig1, use_container_width=True)
+            st.markdown('<div class="section-header">📊 KPI and Volume Analysis</div>', unsafe_allow_html=True)
+            
+            # Use two columns for better dashboard layout
+            col_chart_1, col_chart_2 = st.columns([2, 1])
 
-            st.markdown('<div class="section-header">📉 Yearly KPI by Zone</div>', unsafe_allow_html=True)
+            # Chart 1: Monthly KPI (existing bar chart)
+            with col_chart_1:
+                st.markdown("### Monthly KPI (kWh/m³) by Zone")
+                fig1 = px.bar(
+                    summary,
+                    x="Month", y="kWh_per_m3", color="Zone",
+                    barmode="group",
+                    hover_data=["Produkt", "Energy_kWh", "Volume_m3"],
+                    color_discrete_sequence=px.colors.sequential.Blues_r,
+                    title=""
+                )
+                fig1.update_layout(height=450, xaxis_title="Month", yaxis_title="kWh/m³", plot_bgcolor="white")
+                st.plotly_chart(fig1, use_container_width=True)
+
+            # Chart 2: Volume Breakdown (NEW Pie Chart)
+            with col_chart_2:
+                st.markdown("### Volume Breakdown ($\text{m}^3$) by Zone")
+                fig3 = px.pie(
+                    yearly,
+                    values='Volume_m3',
+                    names='Zone',
+                    hole=.3, 
+                    color_discrete_sequence=px.colors.qualitative.Set1,
+                    title=""
+                )
+                fig3.update_traces(textinfo='percent+label', marker=dict(line=dict(color='#000000', width=1)))
+                fig3.update_layout(height=450, margin=dict(t=50, b=0, l=0, r=0))
+                st.plotly_chart(fig3, use_container_width=True)
+
+
+            st.markdown('<div class="section-header">📉 Yearly KPI by Zone (Product Comparison)</div>', unsafe_allow_html=True)
             fig2 = px.bar(
                 yearly,
                 x="Zone", y="kWh_per_m3", color="Produkt",
@@ -139,6 +177,3 @@ if run_button:
                 )
 
             st.success("✅ KPI Analysis complete. Use the charts above to explore efficiency trends.")
-
-
-
