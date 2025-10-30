@@ -9,10 +9,10 @@ import sys
 # Import the KPI calculation module
 try:
     from dryer_kpi_monthly_final import main as run_kpi, CONFIG
-
-except ImportError:
+except ImportError as e:
     st.error("❌ Unable to import dryer_kpi_monthly_final module")
     st.stop()
+
 
 # ------------------ Page Configuration ------------------
 st.set_page_config(
@@ -368,4 +368,5 @@ if run_button:
             st.error(f"❌ An error occurred during analysis: {str(e)}")
             with st.expander("🔍 View Error Details"):
                 st.exception(e)
+
 
