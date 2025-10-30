@@ -42,69 +42,135 @@ def parse_duration_series(s):
         td.loc[mask_nat] = td2
     return td
 
+def parse_duration_series(s: pd.Series) -> pd.Series:
+    """
+    Convert the free-text “Zeit in Zx” column (e.g. “12:34”, “5 h 30 min”, …)
+    into a pandas Timedelta Series.
+    Return NaT where parsing fails.
+    """
+    # Replace common abbreviations, then let pandas do the heavy lifting
+    s = s.astype(str).str.strip()
+    s = s.replace({
+        r'\bh\b': 'h', r'\bmin\b': 'm', r'\bst\b': 's',
+        r'^\s*$': np.nan, r'^-$': np.nan
+    }, regex=True)
+
+    # pandas can parse most ISO-like strings directly
+    return pd.to_timedelta(s, errors='coerce')
+
+
 def parse_wagon(df):
     df = df.copy()
-    df.columns = [str(c).replace("\n"," ").strip() for c in df.columns]
+
+    # ------------------------------------------------------------------ #
+    # 1. Normalise column names
+    # ------------------------------------------------------------------ #
+    df.columns = [str(c).replace("\n", " ").strip() for c in df.columns]
+
+    # ------------------------------------------------------------------ #
+    # 2. Build the dryer start timestamp (t0)
+    # ------------------------------------------------------------------ #
     if "Pressdat. + Zeit" in df.columns:
         t0 = pd.to_datetime(df["Pressdat. + Zeit"], errors="coerce")
     else:
-        t0 = pd.to_datetime(df.get("Pressen-Datum").astype(str) + " " + df.get("Press-Zeit").astype(str), errors="coerce")
+        t0 = pd.to_datetime(
+            df.get("Pressen-Datum").astype(str) + " " + df.get("Press-Zeit").astype(str),
+            errors="coerce",
+        )
     df["t0"] = t0
+
+    # ------------------------------------------------------------------ #
+    # 3. Identify wagon number column (WG-…)
+    # ------------------------------------------------------------------ #
     for c in df.columns:
         if c.startswith("WG-"):
-            df = df.rename(columns={c:"WG_Nr"})
+            df = df.rename(columns={c: "WG_Nr"})
             break
-    keep_cols = ["WG_Nr","t0","Produkt","Rezept","Stärke","m³",
-                 "In Z2","In Z3","In Z4","In Z5",
-                 "Zeit in Z1","Zeit in Z2","Zeit in Z3","Zeit in Z4","Zeit in Z5"]
+
+    # ------------------------------------------------------------------ #
+    # 4. Keep only the columns we need
+    # ------------------------------------------------------------------ #
+    keep_cols = [
+        "WG_Nr", "t0", "Produkt", "Rezept", "Stärke", "m³",
+        "In Z2", "In Z3", "In Z4", "In Z5",
+        "Zeit in Z1", "Zeit in Z2", "Zeit in Z3", "Zeit in Z4", "Zeit in Z5",
+    ]
     df = df[[c for c in keep_cols if c in df.columns]].copy()
-      # Volume handling
+
+    # ------------------------------------------------------------------ #
+    # 5. Volume (m³) – either direct column or calculated
+    # ------------------------------------------------------------------ #
     if "m³" in df.columns:
         df["m3"] = df["m³"]
     else:
         df["m3"] = 0.605 * 0.605 * (df["Stärke"].astype(float) + 7) / 1000
 
-       # --- Convert all zone entry timestamps properly ---
-    for z in ["Z2", "Z3", "Z4", "Z5"]:
-        col = f"In {z}"
-        if col in df.columns:
-            df[f"{z}_in"] = pd.to_datetime(df[col], errors="coerce", dayfirst=True)
+    # ------------------------------------------------------------------ #
+    # 6. Convert *all* zone-entry timestamps in one go (vectorised)
+    # ------------------------------------------------------------------ #
+    zone_entry_cols = {f"In {z}": f"{z}_in" for z in ("Z2", "Z3", "Z4", "Z5")}
+    for raw, new in zone_entry_cols.items():
+        if raw in df.columns:
+            df[new] = pd.to_datetime(df[raw], errors="coerce", dayfirst=True)
         else:
-            df[f"{z}_in"] = pd.NaT
+            df[new] = pd.NaT
 
-    # --- Add Z1 entry time (dryer start time) ---
+    # Z1 entry = dryer start
     df["Z1_in"] = df["t0"]
 
-    # --- Ensure exit (Entnahme-Zeit) column exists for last zone ---
+    # Exit timestamp of the last zone
     if "Entnahme-Zeit" in df.columns:
         df["Entnahme-Zeit"] = pd.to_datetime(df["Entnahme-Zeit"], errors="coerce", dayfirst=True)
     else:
         df["Entnahme-Zeit"] = pd.NaT
 
-    # --- Safe datetime math helper ---
-    def safe_hours_diff(later, earlier):
-        if pd.notna(later) and pd.notna(earlier):
-            return (later - earlier).total_seconds() / 3600
-        return np.nan
+    # ------------------------------------------------------------------ #
+    # 7. **Vectorised** duration calculation (hours → Timedelta)
+    # ------------------------------------------------------------------ #
+    # Build a list of (later, earlier) pairs – pandas subtracts them element-wise
+    pairs = [
+        ("Z2_in", "t0"),          # Z1 duration
+        ("Z3_in", "Z2_in"),       # Z2 duration
+        ("Z4_in", "Z3_in"),       # Z3 duration
+        ("Z5_in", "Z4_in"),       # Z4 duration
+        ("Entnahme-Zeit", "Z5_in")# Z5 duration
+    ]
 
-    # --- Calculate zone durations safely ---
-    df["Z1_dur_calc"] = [safe_hours_diff(a, b) for a, b in zip(df.get("In Z2"), df["t0"])]
-    df["Z2_dur_calc"] = [safe_hours_diff(a, b) for a, b in zip(df.get("In Z3"), df.get("In Z2"))]
-    df["Z3_dur_calc"] = [safe_hours_diff(a, b) for a, b in zip(df.get("In Z4"), df.get("In Z3"))]
-    df["Z4_dur_calc"] = [safe_hours_diff(a, b) for a, b in zip(df.get("In Z5"), df.get("In Z4"))]
-    df["Z5_dur_calc"] = [safe_hours_diff(a, b) for a, b in zip(df.get("Entnahme-Zeit"), df.get("In Z5"))]
+    for i, (later_col, earlier_col) in enumerate(pairs, start=1):
+        # Subtract → Timedelta, then convert to hours (float) – NaT → NaN
+        hours = (df[later_col] - df[earlier_col]).dt.total_seconds() / 3600
+        df[f"Z{i}_dur_calc"] = hours   # keep the raw float for possible fallback
 
+    # ------------------------------------------------------------------ #
+    # 8. Final zone durations – use parsed text when available,
+    #     otherwise fall back to the calculated value.
+    # ------------------------------------------------------------------ #
+    for z in ("Z1", "Z2", "Z3", "Z4", "Z5"):
+        calc_col = f"{z}_dur_calc"
+        text_col = f"Zeit in {z}"
 
-    # --- Use calculated durations if they make sense, else fallback ---
-    for z in ["Z1", "Z2", "Z3", "Z4", "Z5"]:
-        if f"Zeit in {z}" in df.columns:
-            df[f"{z}_dur"] = parse_duration_series(df[f"Zeit in {z}"])
-            # replace 1-hour placeholders with calculated durations when valid
-            df.loc[df[f"{z}_dur"].isna() | (df[f"{z}_dur"].dt.total_seconds() / 3600 < 1), f"{z}_dur"] = pd.to_timedelta(df[f"{z}_dur_calc"], unit="h")
-        else:
-            df[f"{z}_dur"] = pd.to_timedelta(df[f"{z}_dur_calc"], unit="h")
+        # 8a – start with the *calculated* timedelta (hours → Timedelta)
+        df[f"{z}_dur"] = pd.to_timedelta(df[calc_col], unit="h")
 
+        # 8b – if a text column exists, try to parse it
+        if text_col in df.columns:
+            parsed = parse_duration_series(df[text_col])
+
+            # Replace placeholder “1 hour” (or any <1 h) with the calculated value
+            mask_replace = (
+                parsed.isna() |
+                (parsed.dt.total_seconds() / 3600 < 1)
+            )
+            df.loc[mask_replace, f"{z}_dur"] = df.loc[mask_replace, f"{z}_dur"]
+            # Finally overwrite with the *good* parsed values
+            df[f"{z}_dur"] = parsed.where(~mask_replace, df[f"{z}_dur"])
+        # else: keep the calculated timedelta (already in the column)
+
+    # ------------------------------------------------------------------ #
+    # 9. Helper column for monthly aggregation
+    # ------------------------------------------------------------------ #
     df["Month"] = df["t0"].dt.month
+
     return df
 
 
@@ -235,5 +301,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
