@@ -1,217 +1,144 @@
+import streamlit as st
 import pandas as pd
-import numpy as np
-from pathlib import Path
-import xlsxwriter
+import tempfile
+import plotly.express as px
+from dryer_kpi_monthly_final import main as run_kpi, CONFIG
 
-# CONFIG remains unchanged (lines 7-19)
-CONFIG = {
-    "energy_file": r"E:\Lindner\Python\Energieverbrauch Trockner 1, Stundenweise - Januar - September 2025.xlsx",
-    "energy_sheet": 0,
-    "wagon_file": r"E:\Lindner\Python\Hordenwagenverfolgung_Stand 2025_10_12.xlsm",
-    "wagon_sheet": "Hordenwagenverfolgung",
-    "wagon_header_row": 6,
-    "gas_to_kwh": 11.5,
-    "takt_minutes": 65,
-    "zones_seq": ["Z1","Z2","Z3","Z4","Z5"],
-    "product_filter": ["L36"],     # or None
-    "month_filter": None,          # e.g. 8 for August only
-    "output_file": r"E:\Lindner\Python\Dryer_KPI_Monthly_Results.xlsx"
-}
+# ------------------ Page Configuration ------------------
+st.set_page_config(
+    page_title="Lindner Dryer KPI Dashboard",
+    page_icon="",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-# ---------- Helper Functions (Unchanged - lines 21-197) ----------
-def parse_energy(df):
-# ... (function body unchanged) ...
-    df = df.copy()
-    df["Zeitstempel"] = pd.to_datetime(df["Zeitstempel"])
-    df["Month"] = df["Zeitstempel"].dt.month
-    for z in ["Zone 2", "Zone 3", "Zone 4", "Zone 5"]:
-        col = f"Gasmenge, {z} [m³]"
-        if col in df.columns:
-            df[f"E_{z}_kWh"] = df[col] * CONFIG["gas_to_kwh"]
-    if "Energieverbrauch, elektr. [kWh]" in df.columns:
-        df["E_el_kWh"] = df["Energieverbrauch, elektr. [kWh]"]
-    df["E_start"] = df["Zeitstempel"]
-    df["E_end"] = df["Zeitstempel"] + pd.Timedelta(hours=1)
-    return df
+# ------------------ Custom CSS ------------------
+st.markdown("""
+    <style>
+    /* Main background and font */
+    body {
+        background-color: #f5f7fa;
+        color: #2b2b2b;
+    }
 
-def parse_duration_series(s: pd.Series) -> pd.Series:
-# ... (function body unchanged) ...
-    """
-    Convert the free-text “Zeit in Zx” column (e.g. “12:34”, “5 h 30 min”, …)
-    into a pandas Timedelta Series.
-    Return NaT where parsing fails.
-    """
-    # Replace common abbreviations, then let pandas do the heavy lifting
-    s = s.astype(str).str.strip()
-    s = s.replace({
-        r'\bh\b': 'h', r'\bmin\b': 'm', r'\bst\b': 's',
-        r'^\s*$': np.nan, r'^-$': np.nan
-    }, regex=True)
+    /* Title bar */
+    .main-title {
+        font-size: 36px;
+        color: #003366;
+        font-weight: 700;
+        text-align: center;
+        margin-bottom: 20px;
+    }
 
-    # pandas can parse most ISO-like strings directly
-    return pd.to_timedelta(s, errors='coerce')
+    /* Subheadings */
+    .section-header {
+        color: #003366;
+        font-size: 22px;
+        font-weight: 600;
+        margin-top: 40px;
+        border-bottom: 2px solid #003366;
+        padding-bottom: 6px;
+    }
+
+    /* KPI cards */
+    .metric-card {
+        background-color: white;
+        padding: 20px;
+        border-radius: 10px;
+        text-align: center;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        border-left: 6px solid #0078d4;
+    }
+    </style>
+""", unsafe_allow_html=True)
+
+# ------------------ Header ------------------
+st.markdown('<div class="main-title">Lindner – Dryer KPI Monitoring Dashboard</div>', unsafe_allow_html=True)
+
+st.write("Upload your **Energy** and **Hordenwagen** Excel files to visualize energy KPIs, trends, and efficiency by product and zone.")
+
+# ------------------ Sidebar ------------------
+with st.sidebar:
+    st.image("https://www.karrieretag.org/wp-content/uploads/2023/10/lindner-logo-1.png", use_column_width=True)
+    st.markdown("---")
+    energy_file = st.file_uploader("📊 Upload Energy File (.xlsx)", type=["xlsx"])
+    wagon_file = st.file_uploader("🚛 Upload Hordenwagen File (.xlsm, .xlsx)", type=["xlsm", "xlsx"])
+    products = st.multiselect("🧱 Select Product(s):", ["L30","L32","L34","L36","L38","L40","N40","N44"], default=["L36"])
+    month = st.number_input("📅 Month (1–12, 0 = all months):", 0, 12, 0)
+    st.markdown("---")
+    run_button = st.button("▶️ Run KPI Analysis")
+
+# ------------------ Processing ------------------
+if run_button:
+    if not energy_file or not wagon_file:
+        st.error("⚠️ Please upload both files before running analysis.")
+    else:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp_e, \
+             tempfile.NamedTemporaryFile(delete=False, suffix=".xlsm") as tmp_w:
+            tmp_e.write(energy_file.read())
+            tmp_w.write(wagon_file.read())
+            tmp_e.flush()
+            tmp_w.flush()
+
+            CONFIG["energy_file"] = tmp_e.name
+            CONFIG["wagon_file"] = tmp_w.name
+            CONFIG["product_filter"] = products if products else None
+            CONFIG["month_filter"] = month if month != 0 else None
+            CONFIG["output_file"] = "Dryer_KPI_WebApp_Results.xlsx"
+
+            with st.spinner("⏳ Running KPI Analysis..."):
+                run_kpi()
+
+            # Load results
+            summary = pd.read_excel(CONFIG["output_file"], sheet_name="Summary_By_Month_Zone")
+            yearly = pd.read_excel(CONFIG["output_file"], sheet_name="Yearly_Summary")
+
+            # --------------- KPI Cards ---------------
+            st.markdown('<div class="section-header">📈 Summary KPIs</div>', unsafe_allow_html=True)
+
+            total_energy = yearly["Energy_kWh"].sum()
+            avg_kpi = yearly["kWh_per_m3"].mean()
+            total_volume = yearly["Volume_m3"].sum()
+
+            col1, col2, col3 = st.columns(3)
+            col1.markdown(f'<div class="metric-card"><h3>Total Energy</h3><h2>{total_energy:,.0f} kWh</h2></div>', unsafe_allow_html=True)
+            col2.markdown(f'<div class="metric-card"><h3>Avg. KPI</h3><h2>{avg_kpi:,.2f} kWh/m³</h2></div>', unsafe_allow_html=True)
+            col3.markdown(f'<div class="metric-card"><h3>Total Volume</h3><h2>{total_volume:,.0f} m³</h2></div>', unsafe_allow_html=True)
+
+            # --------------- Charts ---------------
+            st.markdown('<div class="section-header">📊 Monthly KPI (kWh/m³)</div>', unsafe_allow_html=True)
+            fig1 = px.bar(
+                summary,
+                x="Month", y="kWh_per_m3", color="Zone",
+                barmode="group",
+                hover_data=["Produkt", "Energy_kWh", "Volume_m3"],
+                color_discrete_sequence=px.colors.sequential.Blues_r,
+                title=""
+            )
+            fig1.update_layout(height=500, xaxis_title="Month", yaxis_title="kWh/m³", plot_bgcolor="white")
+            st.plotly_chart(fig1, use_container_width=True)
+
+            st.markdown('<div class="section-header">📉 Yearly KPI by Zone</div>', unsafe_allow_html=True)
+            fig2 = px.bar(
+                yearly,
+                x="Zone", y="kWh_per_m3", color="Produkt",
+                hover_data=["Energy_kWh", "Volume_m3"],
+                text_auto=".2f",
+                color_discrete_sequence=px.colors.qualitative.Set2
+            )
+            fig2.update_layout(height=450, xaxis_title="Zone", yaxis_title="kWh/m³", plot_bgcolor="white")
+            st.plotly_chart(fig2, use_container_width=True)
+
+            st.markdown('<div class="section-header">📁 Download Full Excel Report</div>', unsafe_allow_html=True)
+            with open(CONFIG["output_file"], "rb") as f:
+                st.download_button(
+                    label="📥 Download Excel Results",
+                    data=f.read(),
+                    file_name="Dryer_KPI_Results.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
+
+            st.success("✅ KPI Analysis complete. Use the charts above to explore efficiency trends.")
 
 
-def parse_wagon(df):
-# ... (function body unchanged) ...
-    df = df.copy()
-    # ... (all wagon parsing logic remains unchanged) ...
 
-    # ------------------------------------------------------------------ #
-    # 9. Helper column for monthly aggregation
-    # ------------------------------------------------------------------ #
-    df["Month"] = df["t0"].dt.month
-
-    return df
-
-
-def build_intervals(row):
-# ... (function body unchanged) ...
-    intervals = []
-    prev_end = None
-    for z in CONFIG["zones_seq"]:
-        zin = row.get(f"{z}_in", pd.NaT)
-        if pd.isna(zin):
-            zin = prev_end if prev_end is not None else row["t0"]
-        zdur = row.get(f"{z}_dur", pd.NaT)
-        zout = zin + zdur if pd.notna(zin) and pd.notna(zdur) else pd.NaT
-        if pd.notna(zin) and pd.notna(zout) and zout > zin:
-            intervals.append((z, zin, zout))
-            prev_end = zout
-    return intervals
-
-def explode_intervals(df):
-# ... (function body unchanged) ...
-    rows = []
-    for _, r in df.iterrows():
-        ivals = build_intervals(r)
-        for z, a, b in ivals:
-            rows.append({
-                "WG_Nr": r["WG_Nr"], "Produkt": r["Produkt"], "Stärke": r["Stärke"],
-                "m3": r["m3"], "Zone": z, "P_start": a, "P_end": b, "Month": r["Month"]
-            })
-    return pd.DataFrame(rows)
-
-def overlap_hours(a_start, a_end, b_start, b_end):
-# ... (function body unchanged) ...
-    latest = max(a_start, b_start)
-    earliest = min(a_end, b_end)
-    dh = (earliest - latest).total_seconds() / 3600.0
-    return max(0.0, dh)
-
-def allocate_energy(e, ivals):
-# ... (function body unchanged) ...
-    out = []
-    zone_cols = [("Z2","E_Zone 2_kWh"),("Z3","E_Zone 3_kWh"),("Z4","E_Zone 4_kWh"),("Z5","E_Zone 5_kWh")]
-    for _, er in e.iterrows():
-        E_start, E_end, month = er["E_start"], er["E_end"], er["Month"]
-        for zlabel, zcol in zone_cols:
-            if zcol not in e.columns: continue
-            E_hour = er[zcol]
-            if pd.isna(E_hour) or E_hour == 0: continue
-            sub = ivals[(ivals["Zone"]==zlabel) & (ivals["P_end"]>E_start) & (ivals["P_start"]<E_end)]
-            for _, pr in sub.iterrows():
-                ovh = overlap_hours(E_start, E_end, pr["P_start"], pr["P_end"])
-                if ovh > 0:
-                    out.append({
-                        "Month": month, "Zone": zlabel, "Produkt": pr["Produkt"],
-                        "Energy_share_kWh": E_hour * ovh, "Overlap_h": ovh,
-                        "m3": pr["m3"]
-                    })
-    return pd.DataFrame(out)
-
-# ---------- Main (Modified with Error Handling) ----------
-def main():
-    e_raw = pd.read_excel(CONFIG["energy_file"], sheet_name=CONFIG["energy_sheet"])
-    e = parse_energy(e_raw)
-    w_raw = pd.read_excel(CONFIG["wagon_file"], sheet_name=CONFIG["wagon_sheet"], header=CONFIG["wagon_header_row"])
-    w = parse_wagon(w_raw)
-    
-    # --- 1. Apply Filters ---
-    if CONFIG["product_filter"]:
-        w = w[w["Produkt"].astype(str).isin(CONFIG["product_filter"])]
-    if CONFIG["month_filter"]:
-        e = e[e["Month"] == CONFIG["month_filter"]]
-        w = w[w["Month"] == CONFIG["month_filter"]]
-    
-    # --- 2. Check for empty DataFrames after filtering ---
-    if w.empty:
-        # Raise an exception with a descriptive error message
-        msg = "Wagon data is empty after applying filters or failed to load/parse. Check 'wagon_sheet', 'wagon_header_row', 'product_filter', and 'month_filter' in the configuration or the Streamlit inputs."
-        print(f"ERROR: {msg}")
-        raise ValueError(msg) 
-    
-    # --- 3. Run core analysis steps ---
-    ivals = explode_intervals(w)
-    
-    if ivals.empty:
-        # This catches cases where the wagon data is present but the timestamps 
-        # (Z_in, Z_dur) are all invalid, preventing interval creation.
-        msg = "Interval data is empty. Wagon data loaded successfully, but failed to create valid Zone intervals. Check timestamp columns and time duration columns in the Hordenwagen file."
-        print(f"ERROR: {msg}")
-        raise ValueError(msg)
-    
-    alloc = allocate_energy(e, ivals)
-
-    # Monthly summary
-    summary = alloc.groupby(["Month","Produkt","Zone"], as_index=False).agg(
-        Energy_kWh=("Energy_share_kWh","sum"),
-        Volume_m3=("m3","sum")
-    )
-    summary["kWh_per_m3"] = summary["Energy_kWh"] / summary["Volume_m3"].replace(0, np.nan)
-
-    # Yearly summary
-    yearly = summary.groupby(["Produkt","Zone"], as_index=False).agg(
-        Energy_kWh=("Energy_kWh","sum"),
-        Volume_m3=("Volume_m3","sum")
-    )
-    yearly["kWh_per_m3"] = yearly["Energy_kWh"] / yearly["Volume_m3"].replace(0, np.nan)
-
-    # ---------- Excel Output (Unchanged - lines 270-302) ----------
-    with pd.ExcelWriter(CONFIG["output_file"], engine="xlsxwriter") as writer:
-        e.to_excel(writer, sheet_name="Energy_Hourly_Parsed", index=False)
-        w.to_excel(writer, sheet_name="Wagons_Parsed", index=False)
-        ivals.to_excel(writer, sheet_name="Intervals_By_Zone", index=False)
-        alloc.to_excel(writer, sheet_name="Energy_Allocated", index=False)
-        summary.to_excel(writer, sheet_name="Summary_By_Month_Zone", index=False)
-        yearly.to_excel(writer, sheet_name="Yearly_Summary", index=False)
-
-        wb = writer.book
-        fmt_head = wb.add_format({'bold': True, 'bg_color': '#C6E0B4', 'border':1})
-        fmt_num = wb.add_format({'num_format': '#,##0.00', 'border':1})
-        for s in ["Summary_By_Month_Zone","Yearly_Summary"]:
-            ws = writer.sheets[s]
-            ws.set_row(0, 18, fmt_head)
-            ws.set_column("A:F", 18, fmt_num)
-
-        # Charts
-        ws_sum = writer.sheets["Summary_By_Month_Zone"]
-        chart = wb.add_chart({'type':'column'})
-        for z in ["Z2","Z3","Z4","Z5"]:
-            data = summary[summary["Zone"]==z]
-            if data.empty: continue
-            start = summary.index[summary["Zone"]==z].min() + 1
-            chart.add_series({
-                'name': z,
-                'categories': ['Summary_By_Month_Zone', start, 0, start+len(data)-1, 0],
-                'values': ['Summary_By_Month_Zone', start, 5, start+len(data)-1, 5]
-            })
-        chart.set_title({'name': 'Monthly KPI (kWh/m³)'})
-        chart.set_x_axis({'name': 'Month'})
-        chart.set_y_axis({'name': 'kWh/m³'})
-        chart.set_style(10)
-        ws_sum.insert_chart('H2', chart)
-
-        ws_year = writer.sheets["Yearly_Summary"]
-        chart2 = wb.add_chart({'type': 'column'})
-        chart2.add_series({
-            'name': 'Yearly KPI (kWh/m³)',
-            'categories': ['Yearly_Summary', 1, 1, len(yearly), 1],
-            'values': ['Yearly_Summary', 1, 3, len(yearly), 3]
-        })
-        chart2.set_title({'name': 'Yearly KPI per Zone'})
-        chart2.set_style(10)
-        ws_year.insert_chart('H2', chart2)
-
-if __name__ == "__main__":
-    main()
