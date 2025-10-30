@@ -5,6 +5,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 from pathlib import Path
 import sys
+import os
 
 # Import the KPI calculation module
 try:
@@ -370,3 +371,4 @@ if run_button:
             st.error(f"❌ An error occurred during analysis: {str(e)}")
             with st.expander("🔍 View Error Details"):
                 st.exception(e)
+
