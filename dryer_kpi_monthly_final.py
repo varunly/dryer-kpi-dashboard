@@ -158,8 +158,7 @@ def parse_wagon(df: pd.DataFrame) -> pd.DataFrame:
     keep_cols = [
         "WG_Nr", "t0", "Produkt", "Rezept", "Stärke", "m³",
         "In Z2", "In Z3", "In Z4", "In Z5",
-        "Zeit in Z1", "Zeit in Z2", "Zeit in Z3", "Zeit in Z4", "Zeit in Z5",
-    ]
+            ]
     existing_cols = [c for c in keep_cols if c in df.columns]
     df = df[existing_cols].copy()
 
@@ -458,3 +457,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
