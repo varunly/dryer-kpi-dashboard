@@ -459,11 +459,7 @@ def main():
     except Exception as e:
         logger.error(f"Error during analysis: {str(e)}", exc_info=True)
         raise
-    import xlsxwriter
 
 
 if __name__ == "__main__":
     main()
-
-
-
