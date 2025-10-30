@@ -459,6 +459,35 @@ def main():
     except Exception as e:
         logger.error(f"Error during analysis: {str(e)}", exc_info=True)
         raise
+    import xlsxwriter
+
+# --- Add embedded charts to Excel file ---
+    with pd.ExcelWriter(CONFIG["output_file"], engine="xlsxwriter") as writer:
+        summary.to_excel(writer, sheet_name="Summary_By_Month_Zone", index=False)
+        yearly.to_excel(writer, sheet_name="Yearly_Summary", index=False)
+        
+        workbook  = writer.book
+        worksheet = writer.sheets["Summary_By_Month_Zone"]
+    
+        # Create a bar chart for KPI by Month & Zone
+        chart1 = workbook.add_chart({'type': 'column'})
+        chart1.add_series({
+            'categories': ['Summary_By_Month_Zone', 1, summary.columns.get_loc('Month'),
+                           len(summary), summary.columns.get_loc('Month')],
+            'values':     ['Summary_By_Month_Zone', 1, summary.columns.get_loc('kWh_per_m3'),
+                           len(summary), summary.columns.get_loc('kWh_per_m3')],
+            'name': 'KPI (kWh/m³)',
+        })
+        chart1.set_title({'name': 'KPI (kWh/m³) by Month'})
+        chart1.set_x_axis({'name': 'Month'})
+        chart1.set_y_axis({'name': 'kWh/m³'})
+        chart1.set_style(10)
+    
+        # Insert chart below the table
+        worksheet.insert_chart('H2', chart1)
+    
+        # Save workbook
+        writer.close()
 
 
 if __name__ == "__main__":
