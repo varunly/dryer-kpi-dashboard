@@ -223,6 +223,14 @@ def parse_wagon(df: pd.DataFrame) -> pd.DataFrame:
 
     # Filter out invalid records
     df = df[df["t0"].notna()].copy()
+
+    # Drop unwanted intermediate columns
+    cols_to_drop = [
+        "Z2_in", "Z3_in", "Z4_in", "Z5_in", "Z1_in",
+        "Z5_dur_calc", "Z1_dur", "Z2_dur", "Z3_dur", "Z4_dur", "Z5_dur"
+    ]
+    df = df.drop(columns=[c for c in cols_to_drop if c in df.columns], errors="ignore")
+
     
     logger.info(f"Parsed {len(df)} wagon records")
     return df
@@ -457,4 +465,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
