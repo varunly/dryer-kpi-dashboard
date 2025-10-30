@@ -163,12 +163,17 @@ def parse_wagon(df: pd.DataFrame) -> pd.DataFrame:
     existing_cols = [c for c in keep_cols if c in df.columns]
     df = df[existing_cols].copy()
 
-    # Calculate volume (m³)
-    if "m³" in df.columns:
-        df["m3"] = pd.to_numeric(df["m³"], errors='coerce')
-    else:
-        staerke = pd.to_numeric(df.get("Stärke", 0), errors='coerce')
-        df["m3"] = 0.605 * 0.605 * (staerke + 7) / 1000
+# --- Volume per wagon (fixed: 39 plates per wagon) ---
+PLATES_PER_WAGON = 39
+plate_area = 0.605 * 0.605  # m² per plate
+
+if "m³" in df.columns:
+    df["m3_per_plate"] = df["m³"]
+else:
+    df["m3_per_plate"] = plate_area * (df["Stärke"].astype(float) + 7) / 1000  # per plate
+
+# Multiply by number of plates to get total wagon volume
+df["m3"] = df["m3_per_plate"] * PLATES_PER_WAGON
 
     # Parse zone entry timestamps
     zone_entry_cols = {f"In {z}": f"{z}_in" for z in ("Z2", "Z3", "Z4", "Z5")}
@@ -458,3 +463,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
