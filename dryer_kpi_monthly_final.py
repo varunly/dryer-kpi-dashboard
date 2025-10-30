@@ -64,11 +64,11 @@ def parse_wagon(df):
     else:
         df["m3"] = 0.605 * 0.605 * (df["Stärke"].astype(float) + 7) / 1000
 
-    # --- Convert all zone entry timestamps properly ---
+       # --- Convert all zone entry timestamps properly ---
     for z in ["Z2", "Z3", "Z4", "Z5"]:
         col = f"In {z}"
         if col in df.columns:
-            df[f"{z}_in"] = pd.to_datetime(df[col], errors="coerce")
+            df[f"{z}_in"] = pd.to_datetime(df[col], errors="coerce", dayfirst=True)
         else:
             df[f"{z}_in"] = pd.NaT
 
@@ -77,16 +77,23 @@ def parse_wagon(df):
 
     # --- Ensure exit (Entnahme-Zeit) column exists for last zone ---
     if "Entnahme-Zeit" in df.columns:
-        df["Entnahme-Zeit"] = pd.to_datetime(df["Entnahme-Zeit"], errors="coerce")
+        df["Entnahme-Zeit"] = pd.to_datetime(df["Entnahme-Zeit"], errors="coerce", dayfirst=True)
     else:
         df["Entnahme-Zeit"] = pd.NaT
 
-    # --- Calculate zone durations automatically ---
-    df["Z1_dur_calc"] = (df["In Z2"] - df["t0"]).dt.total_seconds() / 3600
-    df["Z2_dur_calc"] = (df["In Z3"] - df["In Z2"]).dt.total_seconds() / 3600
-    df["Z3_dur_calc"] = (df["In Z4"] - df["In Z3"]).dt.total_seconds() / 3600
-    df["Z4_dur_calc"] = (df["In Z5"] - df["In Z4"]).dt.total_seconds() / 3600
-    df["Z5_dur_calc"] = (df["Entnahme-Zeit"] - df["In Z5"]).dt.total_seconds() / 3600
+    # --- Safe datetime math helper ---
+    def safe_hours_diff(later, earlier):
+        if pd.notna(later) and pd.notna(earlier):
+            return (later - earlier).total_seconds() / 3600
+        return np.nan
+
+    # --- Calculate zone durations safely ---
+    df["Z1_dur_calc"] = [safe_hours_diff(a, b) for a, b in zip(df.get("In Z2"), df["t0"])]
+    df["Z2_dur_calc"] = [safe_hours_diff(a, b) for a, b in zip(df.get("In Z3"), df.get("In Z2"))]
+    df["Z3_dur_calc"] = [safe_hours_diff(a, b) for a, b in zip(df.get("In Z4"), df.get("In Z3"))]
+    df["Z4_dur_calc"] = [safe_hours_diff(a, b) for a, b in zip(df.get("In Z5"), df.get("In Z4"))]
+    df["Z5_dur_calc"] = [safe_hours_diff(a, b) for a, b in zip(df.get("Entnahme-Zeit"), df.get("In Z5"))]
+
 
     # --- Use calculated durations if they make sense, else fallback ---
     for z in ["Z1", "Z2", "Z3", "Z4", "Z5"]:
@@ -228,4 +235,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
