@@ -170,7 +170,14 @@ def parse_wagon(df):
     # 9. Helper column for monthly aggregation
     # ------------------------------------------------------------------ #
     df["Month"] = df["t0"].dt.month
-
+ # ------------------------------------------------------------------ #
+        # 10. Drop unnecessary intermediate columns
+    # ------------------------------------------------------------------ #
+    cols_to_drop = [
+        "Zeit in Z1", "Zeit in Z2", "Zeit in Z3", "Zeit in Z4", "Zeit in Z5",
+        "Z1_dur", "Z2_dur", "Z3_dur", "Z4_dur", "Z5_dur"
+    ]
+    df = df.drop(columns=[c for c in cols_to_drop if c in df.columns], errors="ignore")
     return df
 
 
@@ -301,6 +308,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
