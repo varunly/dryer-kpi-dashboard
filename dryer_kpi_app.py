@@ -984,26 +984,8 @@ with tab2:
                     use_container_width=True
                 )
     
-    # Quick optimization in sidebar
-    with st.sidebar:
-        st.markdown("---")
-        st.markdown("### ⚡ Quick Optimization")
-        quick_products = st.multiselect(
-            "Quick select:",
-            ["L30", "L36", "L38", "L40"],
-            default=["L36", "L38"],
-            key="quick_opt"
-        )
-        
-        if st.button("Get Quick Order", key="quick_btn"):
-            if len(quick_products) >= 2:
-                hist_data = st.session_state.get('analysis_results', {}).get('yearly') if use_historical else None
-                opt_order, _, _ = optimize_production_sequence(quick_products, hist_data)
-                st.success("Best order:")
-                for i, p in enumerate(opt_order, 1):
-                    st.write(f"{i}. **{p}**")
-            else:
-                st.info("Select at least 2 products")
+    
+
 
 
 
