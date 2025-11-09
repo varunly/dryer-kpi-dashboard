@@ -621,44 +621,44 @@ with tab2:
     # FIND THE OPTIMIZATION BUTTON CLICK (if st.button("🔍 Calculate Optimal Sequence"))
 # AND REPLACE THE WHOLE BLOCK WITH:
 
-if st.button("🔍 Calculate Optimal Sequence", use_container_width=True, key="optimize"):
-    if len(selected_products) < 2:
-        st.error("❌ Please select at least 2 products for optimization.")
-    elif len(selected_products) > 4:
-        st.error("❌ Please select maximum 4 products for optimization.")
-    else:
-        with st.spinner("Calculating with historical intelligence..."):
-            # Get historical data
-            historical_data = hdm.get_consolidated_historical_data()
-            
-            # Use session state results if available
-            current_data = None
-            if 'analysis_results' in st.session_state:
-                current_data = st.session_state['analysis_results']['yearly']
-            
-            # Combine historical and current
-            if historical_data is not None:
-                if current_data is not None:
-                    st.success("✅ Using combined historical + current data")
-                    combined_data, _ = hdm.merge_with_current_data(current_data, weight_historical=0.5)
+    if st.button("🔍 Calculate Optimal Sequence", use_container_width=True, key="optimize"):
+        if len(selected_products) < 2:
+            st.error("❌ Please select at least 2 products for optimization.")
+        elif len(selected_products) > 4:
+            st.error("❌ Please select maximum 4 products for optimization.")
+        else:
+            with st.spinner("Calculating with historical intelligence..."):
+                # Get historical data
+                historical_data = hdm.get_consolidated_historical_data()
+                
+                # Use session state results if available
+                current_data = None
+                if 'analysis_results' in st.session_state:
+                    current_data = st.session_state['analysis_results']['yearly']
+                
+                # Combine historical and current
+                if historical_data is not None:
+                    if current_data is not None:
+                        st.success("✅ Using combined historical + current data")
+                        combined_data, _ = hdm.merge_with_current_data(current_data, weight_historical=0.5)
+                    else:
+                        st.info("📚 Using historical data")
+                        combined_data = historical_data
+                elif current_data is not None:
+                    st.warning("⚠️ Using current session only")
+                    combined_data = current_data
                 else:
-                    st.info("📚 Using historical data")
-                    combined_data = historical_data
-            elif current_data is not None:
-                st.warning("⚠️ Using current session only")
-                combined_data = current_data
-            else:
-                st.error("❌ No data available. Run KPI analysis first.")
-                st.stop()
-            
-            # Run optimization
-            optimal_order, total_cost, metrics = optimize_production_sequence(
-                selected_products, 
-                combined_data  # Now uses historical!
-            )
-            
-            # Save optimization result
-            hdm.save_optimization_result(selected_products, optimal_order, metrics)
+                    st.error("❌ No data available. Run KPI analysis first.")
+                    st.stop()
+                
+                # Run optimization
+                optimal_order, total_cost, metrics = optimize_production_sequence(
+                    selected_products, 
+                    combined_data  # Now uses historical!
+                )
+                
+                # Save optimization result
+                hdm.save_optimization_result(selected_products, optimal_order, metrics)
             
             # ... rest of the display code remains the same ...
                 
@@ -762,4 +762,5 @@ if st.button("🔍 Calculate Optimal Sequence", use_container_width=True, key="o
                     st.write(f"{i}. **{p}**")
             else:
                 st.info("Select at least 2 products")
+
 
