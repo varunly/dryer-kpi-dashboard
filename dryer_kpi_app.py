@@ -5,6 +5,8 @@ import plotly.express as px
 import plotly.graph_objects as go
 from pathlib import Path
 import sys
+import numpy as np
+from itertools import permutations
 
 # Import the KPI calculation module
 try:
@@ -67,6 +69,14 @@ st.markdown("""
         font-weight: 700;
     }
     
+    .optimization-card {
+        background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+        padding: 15px;
+        border-radius: 10px;
+        color: white;
+        margin-bottom: 10px;
+    }
+    
     .stDownloadButton button {
         background-color: #003366;
         color: white;
@@ -77,52 +87,216 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# ------------------ Header ------------------
-st.markdown('<div class="main-title">🏭 Lindner – Dryer KPI Monitoring Dashboard</div>', 
-            unsafe_allow_html=True)
+# ------------------ Helper Functions for Optimization ------------------
+def calculate_product_characteristics(product):
+    """Extract product characteristics for optimization"""
+    prefix = product[0]  # L, N, or U
+    thickness = int(product[1:]) if product[1:].isdigit() else 0
+    return prefix, thickness
 
-st.info("📊 Upload your Energy and Hordenwagen files to analyze dryer efficiency across zones and products.")
+def calculate_transition_cost(prod1, prod2, historical_data=None):
+    """Calculate the cost of transitioning between two products"""
+    prefix1, thick1 = calculate_product_characteristics(prod1)
+    prefix2, thick2 = calculate_product_characteristics(prod2)
+    
+    cost = 0
+    
+    # Thickness change penalty (energy for temperature adjustment)
+    thickness_diff = abs(thick2 - thick1)
+    cost += thickness_diff * 2.5  # 2.5 kWh per mm difference
+    
+    # Material type change penalty
+    if prefix1 != prefix2:
+        cost += 25  # Fixed penalty for material change
+    
+    # Use historical data if available
+    if historical_data is not None and not historical_data.empty:
+        prod1_data = historical_data[historical_data['Produkt'] == prod1]
+        prod2_data = historical_data[historical_data['Produkt'] == prod2]
+        
+        if not prod1_data.empty and not prod2_data.empty:
+            energy1 = prod1_data['kWh_per_m3'].mean()
+            energy2 = prod2_data['kWh_per_m3'].mean()
+            if not np.isnan(energy1) and not np.isnan(energy2):
+                cost += abs(energy2 - energy1) * 0.8
+    
+    return cost
 
-# ------------------ Sidebar ------------------
-with st.sidebar:
-    st.image("https://www.karrieretag.org/wp-content/uploads/2023/10/lindner-logo-1.png", 
-             use_column_width=True)
-    st.markdown("---")
+def optimize_production_sequence(products, historical_data=None):
+    """Find the optimal production sequence to minimize energy consumption"""
     
-    st.subheader("📁 Data Upload")
-    energy_file = st.file_uploader(
-        "📊 Energy File (.xlsx)", 
-        type=["xlsx"],
-        help="Upload the hourly energy consumption Excel file"
-    )
-    wagon_file = st.file_uploader(
-        "🚛 Hordenwagen File (.xlsm, .xlsx)", 
-        type=["xlsm", "xlsx"],
-        help="Upload the wagon tracking Excel file"
-    )
+    if len(products) <= 1:
+        return products, 0, {}
     
-    st.markdown("---")
-    st.subheader("⚙️ Filters")
+    # For small lists (≤ 7), check all permutations
+    if len(products) <= 7:
+        best_order = None
+        best_cost = float('inf')
+        all_costs = []
+        
+        for perm in permutations(products):
+            cost = sum(calculate_transition_cost(perm[i], perm[i+1], historical_data) 
+                      for i in range(len(perm)-1))
+            all_costs.append(cost)
+            if cost < best_cost:
+                best_cost = cost
+                best_order = list(perm)
+        
+        # Calculate savings
+        worst_cost = max(all_costs) if all_costs else best_cost
+        avg_cost = np.mean(all_costs) if all_costs else best_cost
+        
+    else:
+        # For larger lists, use greedy algorithm with 2-opt improvement
+        # Initial greedy solution
+        remaining = set(products)
+        
+        # Start with the product with lowest energy (if data available)
+        if historical_data is not None and not historical_data.empty:
+            energy_map = {}
+            for prod in products:
+                prod_data = historical_data[historical_data['Produkt'] == prod]
+                energy_map[prod] = prod_data['kWh_per_m3'].mean() if not prod_data.empty else 100
+            current = min(remaining, key=lambda x: energy_map.get(x, 100))
+        else:
+            current = min(remaining, key=lambda x: int(x[1:]) if x[1:].isdigit() else 0)
+        
+        best_order = [current]
+        remaining.remove(current)
+        
+        # Build sequence greedily
+        while remaining:
+            next_prod = min(remaining, 
+                          key=lambda x: calculate_transition_cost(current, x, historical_data))
+            best_order.append(next_prod)
+            remaining.remove(next_prod)
+            current = next_prod
+        
+        # Apply 2-opt improvement
+        improved = True
+        while improved:
+            improved = False
+            for i in range(1, len(best_order) - 1):
+                for j in range(i + 1, len(best_order)):
+                    # Try reversing the segment
+                    new_order = best_order[:i] + best_order[i:j+1][::-1] + best_order[j+1:]
+                    
+                    old_cost = sum(calculate_transition_cost(best_order[k], best_order[k+1], historical_data) 
+                                 for k in range(len(best_order)-1))
+                    new_cost = sum(calculate_transition_cost(new_order[k], new_order[k+1], historical_data) 
+                                 for k in range(len(new_order)-1))
+                    
+                    if new_cost < old_cost:
+                        best_order = new_order
+                        improved = True
+                        break
+                if improved:
+                    break
+        
+        best_cost = sum(calculate_transition_cost(best_order[i], best_order[i+1], historical_data) 
+                       for i in range(len(best_order)-1))
+        
+        # Estimate worst case
+        worst_order = sorted(products, key=lambda x: int(x[1:]) if x[1:].isdigit() else 0)
+        worst_order = worst_order[::2] + worst_order[1::2][::-1]  # Zigzag pattern
+        worst_cost = sum(calculate_transition_cost(worst_order[i], worst_order[i+1], historical_data) 
+                        for i in range(len(worst_order)-1))
+        avg_cost = (best_cost + worst_cost) / 2
     
-    products = st.multiselect(
-        "🧱 Product(s):",
-        ["L30", "L32", "L34", "L36", "L38", "L40", "N40", "N44"],
-        default=["L36"],
-        help="Select one or more products to analyze"
-    )
+    metrics = {
+        'best_cost': best_cost,
+        'worst_cost': worst_cost,
+        'avg_cost': avg_cost,
+        'savings_vs_worst': (worst_cost - best_cost) / worst_cost if worst_cost > 0 else 0,
+        'savings_vs_avg': (avg_cost - best_cost) / avg_cost if avg_cost > 0 else 0
+    }
     
-    month = st.number_input(
-        "📅 Month (0 = all):",
-        min_value=0,
-        max_value=12,
-        value=0,
-        help="Filter by specific month (1-12) or 0 for all months"
-    )
-    
-    st.markdown("---")
-    run_button = st.button("▶️ Run Analysis", use_container_width=True)
+    return best_order, best_cost, metrics
 
-# ------------------ Helper Functions ------------------
+def create_sequence_visualization(order, costs, historical_data=None):
+    """Create visualization for the production sequence"""
+    
+    # Get energy values for each product
+    energy_values = []
+    for product in order:
+        if historical_data is not None and not historical_data.empty:
+            prod_data = historical_data[historical_data['Produkt'] == product]
+            if not prod_data.empty:
+                energy_values.append(prod_data['kWh_per_m3'].mean())
+            else:
+                energy_values.append(100 + int(product[1:]) if product[1:].isdigit() else 100)
+        else:
+            energy_values.append(100 + int(product[1:]) if product[1:].isdigit() else 100)
+    
+    # Create figure with subplots
+    fig = go.Figure()
+    
+    # Add main energy consumption trace
+    fig.add_trace(go.Scatter(
+        x=list(range(len(order))),
+        y=energy_values,
+        mode='lines+markers+text',
+        name='Energy Level',
+        text=order,
+        textposition="top center",
+        line=dict(color='#005691', width=3),
+        marker=dict(size=12, color='#003366', 
+                   line=dict(color='white', width=2))
+    ))
+    
+    # Add transition cost annotations
+    for i in range(len(order)-1):
+        transition_cost = calculate_transition_cost(order[i], order[i+1], historical_data)
+        
+        # Add arrow showing transition
+        fig.add_annotation(
+            x=i,
+            y=energy_values[i],
+            ax=i+1,
+            ay=energy_values[i+1],
+            xref="x",
+            yref="y",
+            axref="x",
+            ayref="y",
+            showarrow=True,
+            arrowhead=3,
+            arrowsize=1,
+            arrowwidth=1,
+            arrowcolor="red",
+            opacity=0.5
+        )
+        
+        # Add cost label
+        fig.add_annotation(
+            x=i+0.5,
+            y=(energy_values[i] + energy_values[i+1])/2,
+            text=f"Cost: {transition_cost:.1f}",
+            showarrow=False,
+            font=dict(size=10, color='red'),
+            bgcolor="white",
+            opacity=0.8
+        )
+    
+    fig.update_layout(
+        title="Production Sequence Energy Profile & Transition Costs",
+        xaxis_title="Production Order",
+        yaxis_title="Energy Consumption (kWh/m³)",
+        height=450,
+        showlegend=False,
+        plot_bgcolor='white',
+        xaxis=dict(
+            tickmode='array',
+            tickvals=list(range(len(order))),
+            ticktext=order,
+            showgrid=True,
+            gridcolor='lightgray'
+        ),
+        yaxis=dict(showgrid=True, gridcolor='lightgray')
+    )
+    
+    return fig
+
+# ------------------ Main App Functions ------------------
 def create_kpi_card(title, value, unit):
     """Create a styled KPI metric card"""
     return f'''
@@ -211,162 +385,350 @@ def run_analysis(energy_path, wagon_path, products_filter, month_filter):
         progress_bar.empty()
         raise e
 
-# ------------------ Main Processing ------------------
-if run_button:
-    if not energy_file or not wagon_file:
-        st.error("⚠️ Please upload both files before running analysis.")
-    else:
-        try:
-            # Create temporary files
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp_e, \
-                 tempfile.NamedTemporaryFile(delete=False, suffix=".xlsm") as tmp_w:
-                
-                tmp_e.write(energy_file.read())
-                tmp_w.write(wagon_file.read())
-                tmp_e.flush()
-                tmp_w.flush()
-                
-                # Run analysis
-                results = run_analysis(
-                    tmp_e.name,
-                    tmp_w.name,
-                    products if products else None,
-                    month if month != 0 else None
-                )
-                
-                summary = results['summary']
-                yearly = results['yearly']
-                
-                # Check if we have data
-                if summary.empty:
-                    st.warning("⚠️ No data found matching the selected filters.")
-                    st.stop()
-                
-                # --------------- KPI Cards ---------------
-                st.markdown('<div class="section-header">📈 Summary KPIs</div>', 
-                           unsafe_allow_html=True)
-                
-                total_energy = yearly["Energy_kWh"].sum()
-                avg_kpi = yearly["kWh_per_m3"].mean()
-                total_volume = yearly["Volume_m3"].sum()
-                
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    st.markdown(
-                        create_kpi_card("Total Energy", total_energy, "kWh"),
-                        unsafe_allow_html=True
+# ------------------ Header ------------------
+st.markdown('<div class="main-title">🏭 Lindner – Dryer KPI Monitoring Dashboard</div>', 
+            unsafe_allow_html=True)
+
+# Create tabs for different functionalities
+tab1, tab2 = st.tabs(["📊 KPI Analysis", "🔄 Production Order Optimization"])
+
+# ------------------ Tab 1: KPI Analysis ------------------
+with tab1:
+    st.info("📊 Upload your Energy and Hordenwagen files to analyze dryer efficiency across zones and products.")
+    
+    # Sidebar for KPI Analysis
+    with st.sidebar:
+        st.image("https://www.karrieretag.org/wp-content/uploads/2023/10/lindner-logo-1.png", 
+                 use_column_width=True)
+        st.markdown("---")
+        
+        st.subheader("📁 Data Upload")
+        energy_file = st.file_uploader(
+            "📊 Energy File (.xlsx)", 
+            type=["xlsx"],
+            help="Upload the hourly energy consumption Excel file",
+            key="energy_kpi"
+        )
+        wagon_file = st.file_uploader(
+            "🚛 Hordenwagen File (.xlsm, .xlsx)", 
+            type=["xlsm", "xlsx"],
+            help="Upload the wagon tracking Excel file",
+            key="wagon_kpi"
+        )
+        
+        st.markdown("---")
+        st.subheader("⚙️ Filters")
+        
+        products = st.multiselect(
+            "🧱 Product(s):",
+            ["L28", "L30", "L32", "L34", "L36", "L38", "L40", "L44", "N40", "N44", "U36"],
+            default=["L36"],
+            help="Select one or more products to analyze",
+            key="products_kpi"
+        )
+        
+        month = st.number_input(
+            "📅 Month (0 = all):",
+            min_value=0,
+            max_value=12,
+            value=0,
+            help="Filter by specific month (1-12) or 0 for all months",
+            key="month_kpi"
+        )
+        
+        st.markdown("---")
+        run_button = st.button("▶️ Run Analysis", use_container_width=True, key="run_kpi")
+    
+    # Main area for KPI results
+    if run_button:
+        if not energy_file or not wagon_file:
+            st.error("⚠️ Please upload both files before running analysis.")
+        else:
+            try:
+                # Create temporary files
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp_e, \
+                     tempfile.NamedTemporaryFile(delete=False, suffix=".xlsm") as tmp_w:
+                    
+                    tmp_e.write(energy_file.read())
+                    tmp_w.write(wagon_file.read())
+                    tmp_e.flush()
+                    tmp_w.flush()
+                    
+                    # Run analysis
+                    results = run_analysis(
+                        tmp_e.name,
+                        tmp_w.name,
+                        products if products else None,
+                        month if month != 0 else None
                     )
-                with col2:
-                    st.markdown(
-                        create_kpi_card("Avg. Efficiency", avg_kpi, "kWh/m³"),
-                        unsafe_allow_html=True
-                    )
-                with col3:
-                    st.markdown(
-                        create_kpi_card("Total Volume", total_volume, "m³"),
-                        unsafe_allow_html=True
-                    )
-                
-                # --------------- Monthly Trend ---------------
-                st.markdown('<div class="section-header">📊 Monthly KPI Trend</div>', 
-                           unsafe_allow_html=True)
-                
-                fig1 = px.line(
-                    summary,
-                    x="Month",
-                    y="kWh_per_m3",
-                    color="Zone",
-                    markers=True,
-                    hover_data=["Produkt", "Energy_kWh", "Volume_m3"],
-                    title="Energy Efficiency by Month and Zone"
-                )
-                fig1.update_layout(
-                    height=500,
-                    xaxis_title="Month",
-                    yaxis_title="kWh/m³",
-                    plot_bgcolor="white",
-                    hovermode='x unified'
-                )
-                st.plotly_chart(fig1, use_container_width=True)
-                
-                # --------------- Zone Comparison ---------------
-                st.markdown('<div class="section-header">📉 Zone Comparison</div>', 
-                           unsafe_allow_html=True)
-                
-                col1, col2 = st.columns(2)
-                
-                with col1:
-                    fig2 = px.bar(
-                        yearly,
-                        x="Zone",
+                    
+                    # Store results in session state for optimization tab
+                    st.session_state['analysis_results'] = results
+                    
+                    summary = results['summary']
+                    yearly = results['yearly']
+                    
+                    # Check if we have data
+                    if summary.empty:
+                        st.warning("⚠️ No data found matching the selected filters.")
+                        st.stop()
+                    
+                    # --------------- KPI Cards ---------------
+                    st.markdown('<div class="section-header">📈 Summary KPIs</div>', 
+                               unsafe_allow_html=True)
+                    
+                    total_energy = yearly["Energy_kWh"].sum()
+                    avg_kpi = yearly["kWh_per_m3"].mean()
+                    total_volume = yearly["Volume_m3"].sum()
+                    
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.markdown(
+                            create_kpi_card("Total Energy", total_energy, "kWh"),
+                            unsafe_allow_html=True
+                        )
+                    with col2:
+                        st.markdown(
+                            create_kpi_card("Avg. Efficiency", avg_kpi, "kWh/m³"),
+                            unsafe_allow_html=True
+                        )
+                    with col3:
+                        st.markdown(
+                            create_kpi_card("Total Volume", total_volume, "m³"),
+                            unsafe_allow_html=True
+                        )
+                    
+                    # --------------- Monthly Trend ---------------
+                    st.markdown('<div class="section-header">📊 Monthly KPI Trend</div>', 
+                               unsafe_allow_html=True)
+                    
+                    fig1 = px.line(
+                        summary,
+                        x="Month",
                         y="kWh_per_m3",
-                        color="Produkt",
-                        text_auto=".2f",
-                        title="Yearly KPI by Zone"
+                        color="Zone",
+                        markers=True,
+                        hover_data=["Produkt", "Energy_kWh", "Volume_m3"],
+                        title="Energy Efficiency by Month and Zone"
                     )
-                    fig2.update_layout(height=400, plot_bgcolor="white")
-                    st.plotly_chart(fig2, use_container_width=True)
+                    fig1.update_layout(
+                        height=500,
+                        xaxis_title="Month",
+                        yaxis_title="kWh/m³",
+                        plot_bgcolor="white",
+                        hovermode='x unified'
+                    )
+                    st.plotly_chart(fig1, use_container_width=True)
+                    
+                    # --------------- Zone Comparison ---------------
+                    st.markdown('<div class="section-header">📉 Zone Comparison</div>', 
+                               unsafe_allow_html=True)
+                    
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        fig2 = px.bar(
+                            yearly,
+                            x="Zone",
+                            y="kWh_per_m3",
+                            color="Produkt",
+                            text_auto=".2f",
+                            title="Yearly KPI by Zone"
+                        )
+                        fig2.update_layout(height=400, plot_bgcolor="white")
+                        st.plotly_chart(fig2, use_container_width=True)
+                    
+                    with col2:
+                        fig3 = px.pie(
+                            yearly,
+                            values="Energy_kWh",
+                            names="Zone",
+                            title="Energy Distribution by Zone"
+                        )
+                        fig3.update_layout(height=400)
+                        st.plotly_chart(fig3, use_container_width=True)
+                    
+                    # --------------- Download Section ---------------
+                    st.markdown('<div class="section-header">📥 Export Results</div>', 
+                               unsafe_allow_html=True)
+                    
+                    # Create Excel file in memory
+                    output_path = "Dryer_KPI_Results.xlsx"
+                    with pd.ExcelWriter(output_path, engine="xlsxwriter") as writer:
+                        results['energy'].to_excel(writer, sheet_name="Energy_Data", index=False)
+                        results['wagons'].to_excel(writer, sheet_name="Wagon_Data", index=False)
+                        results['intervals'].to_excel(writer, sheet_name="Zone_Intervals", index=False)
+                        results['allocation'].to_excel(writer, sheet_name="Energy_Allocation", index=False)
+                        summary.to_excel(writer, sheet_name="Monthly_Summary", index=False)
+                        yearly.to_excel(writer, sheet_name="Yearly_Summary", index=False)
+                    
+                    with open(output_path, "rb") as f:
+                        st.download_button(
+                            label="📥 Download Complete Excel Report",
+                            data=f.read(),
+                            file_name="Dryer_KPI_Analysis.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            use_container_width=True
+                        )
+                    
+                    st.success("✅ Analysis complete! Explore the visualizations above or download the full report.")
+                    
+            except Exception as e:
+                st.error(f"❌ An error occurred during analysis: {str(e)}")
+                with st.expander("🔍 View Error Details"):
+                    st.exception(e)
+
+# ------------------ Tab 2: Production Order Optimization ------------------
+with tab2:
+    st.markdown('<div class="section-header">🔄 Production Order Optimization</div>', 
+                unsafe_allow_html=True)
+    
+    st.info("Select products to find the most energy-efficient production sequence based on transition costs and historical data.")
+    
+    col1, col2, col3 = st.columns([2, 1, 1])
+    
+    with col1:
+        available_products = ["L28", "L30", "L32", "L34", "L36", "L38", "L40", "L44", "N40", "N44", "U36"]
+        selected_products = st.multiselect(
+            "Select products for optimization:",
+            available_products,
+            default=["L36", "L38", "L30", "L32"],
+            help="Choose the products you plan to produce",
+            key="opt_products"
+        )
+    
+    with col2:
+        wagons_per_product = st.number_input(
+            "Wagons per product:",
+            min_value=1,
+            max_value=100,
+            value=20,
+            help="Number of wagons for each product type",
+            key="wagons_count"
+        )
+    
+    with col3:
+        use_historical = st.checkbox(
+            "Use historical data",
+            value=True,
+            help="Use KPI analysis results for better optimization",
+            key="use_hist"
+        )
+    
+    # Optimization button
+    if st.button("🔍 Calculate Optimal Sequence", use_container_width=True, key="optimize"):
+        if len(selected_products) < 2:
+            st.warning("Please select at least 2 products for optimization.")
+        else:
+            with st.spinner("Calculating optimal production sequence..."):
+                # Get historical data if available
+                historical_data = None
+                if use_historical and 'analysis_results' in st.session_state:
+                    historical_data = st.session_state['analysis_results']['yearly']
+                
+                # Calculate optimal order
+                optimal_order, total_cost, metrics = optimize_production_sequence(
+                    selected_products, 
+                    historical_data
+                )
+                
+                # Display results
+                st.success("✅ Optimal production sequence calculated!")
+                
+                # Results in columns
+                col1, col2, col3 = st.columns(3)
+                
+                with col1:
+                    st.markdown("### 🏆 Recommended Order")
+                    for i, product in enumerate(optimal_order, 1):
+                        st.markdown(f'<div class="optimization-card">{i}. <b>{product}</b></div>', 
+                                   unsafe_allow_html=True)
                 
                 with col2:
-                    fig3 = px.pie(
-                        yearly,
-                        values="Energy_kWh",
-                        names="Zone",
-                        title="Energy Distribution by Zone"
-                    )
-                    fig3.update_layout(height=400)
-                    st.plotly_chart(fig3, use_container_width=True)
+                    st.markdown("### 💰 Cost Metrics")
+                    st.metric("Total Transition Cost", f"{total_cost:.1f} kWh")
+                    st.metric("Avg Cost vs Optimal", f"{metrics['savings_vs_avg']:.1%}")
+                    st.metric("Worst Case vs Optimal", f"{metrics['savings_vs_worst']:.1%}")
                 
-                # --------------- Data Tables ---------------
-                with st.expander("📋 View Detailed Data Tables"):
-                    tab1, tab2 = st.tabs(["Monthly Summary", "Yearly Summary"])
+                with col3:
+                    st.markdown("### 📊 Production Stats")
+                    total_wagons = len(selected_products) * wagons_per_product
+                    st.metric("Total Wagons", total_wagons)
+                    st.metric("Product Types", len(selected_products))
+                    st.metric("Avg Transition Cost", f"{total_cost/(len(optimal_order)-1):.1f} kWh")
+                
+                # Visualization
+                st.markdown("### 📈 Production Sequence Visualization")
+                fig_seq = create_sequence_visualization(optimal_order, metrics, historical_data)
+                st.plotly_chart(fig_seq, use_container_width=True)
+                
+                # Recommendations
+                st.markdown("### 💡 Production Recommendations")
+                
+                recommendations = []
+                for i in range(len(optimal_order)-1):
+                    curr = optimal_order[i]
+                    next_prod = optimal_order[i+1]
                     
-                    with tab1:
-                        st.dataframe(
-                            summary.style.format({
-                                "Energy_kWh": "{:.2f}",
-                                "Volume_m3": "{:.2f}",
-                                "kWh_per_m3": "{:.2f}"
-                            }),
-                            use_container_width=True
+                    curr_thick = int(curr[1:]) if curr[1:].isdigit() else 0
+                    next_thick = int(next_prod[1:]) if next_prod[1:].isdigit() else 0
+                    
+                    if abs(next_thick - curr_thick) > 6:
+                        recommendations.append(
+                            f"⚠️ Large thickness change from {curr} ({curr_thick}mm) to {next_prod} ({next_thick}mm). "
+                            f"Consider intermediate thickness if available."
                         )
                     
-                    with tab2:
-                        st.dataframe(
-                            yearly.style.format({
-                                "Energy_kWh": "{:.2f}",
-                                "Volume_m3": "{:.2f}",
-                                "kWh_per_m3": "{:.2f}"
-                            }),
-                            use_container_width=True
+                    if curr[0] != next_prod[0]:
+                        recommendations.append(
+                            f"🔄 Material type change from {curr} to {next_prod}. "
+                            f"Schedule cleaning/adjustment time between batches."
                         )
                 
-                # --------------- Download Section ---------------
-                st.markdown('<div class="section-header">📥 Export Results</div>', 
-                           unsafe_allow_html=True)
+                if recommendations:
+                    for rec in recommendations:
+                        st.info(rec)
+                else:
+                    st.success("✅ Sequence is well-optimized with smooth transitions!")
                 
-                # Create Excel file in memory
-                output_path = "Dryer_KPI_Results.xlsx"
-                with pd.ExcelWriter(output_path, engine="xlsxwriter") as writer:
-                    results['energy'].to_excel(writer, sheet_name="Energy_Data", index=False)
-                    results['wagons'].to_excel(writer, sheet_name="Wagon_Data", index=False)
-                    results['intervals'].to_excel(writer, sheet_name="Zone_Intervals", index=False)
-                    results['allocation'].to_excel(writer, sheet_name="Energy_Allocation", index=False)
-                    summary.to_excel(writer, sheet_name="Monthly_Summary", index=False)
-                    yearly.to_excel(writer, sheet_name="Yearly_Summary", index=False)
+                # Export optimization results
+                st.markdown("### 📥 Export Optimization Plan")
                 
-                with open(output_path, "rb") as f:
-                    st.download_button(
-                        label="📥 Download Complete Excel Report",
-                        data=f.read(),
-                        file_name="Dryer_KPI_Analysis.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        use_container_width=True
-                    )
+                # Create optimization report
+                opt_df = pd.DataFrame({
+                    'Order': range(1, len(optimal_order) + 1),
+                    'Product': optimal_order,
+                    'Wagons': wagons_per_product,
+                    'Transition_Cost': [0] + [calculate_transition_cost(optimal_order[i], optimal_order[i+1], historical_data) 
+                                              for i in range(len(optimal_order)-1)]
+                })
                 
-                st.success("✅ Analysis complete! Explore the visualizations above or download the full report.")
-                
-        except Exception as e:
-            st.error(f"❌ An error occurred during analysis: {str(e)}")
-            with st.expander("🔍 View Error Details"):
-                st.exception(e)
+                csv = opt_df.to_csv(index=False)
+                st.download_button(
+                    label="📥 Download Production Plan (CSV)",
+                    data=csv,
+                    file_name="optimal_production_sequence.csv",
+                    mime="text/csv",
+                    use_container_width=True
+                )
+    
+    # Quick optimization in sidebar
+    with st.sidebar:
+        st.markdown("---")
+        st.markdown("### ⚡ Quick Optimization")
+        quick_products = st.multiselect(
+            "Quick select:",
+            ["L30", "L36", "L38", "L40"],
+            default=["L36", "L38"],
+            key="quick_opt"
+        )
+        
+        if st.button("Get Quick Order", key="quick_btn"):
+            if len(quick_products) >= 2:
+                hist_data = st.session_state.get('analysis_results', {}).get('yearly') if use_historical else None
+                opt_order, _, _ = optimize_production_sequence(quick_products, hist_data)
+                st.success("Best order:")
+                for i, p in enumerate(opt_order, 1):
+                    st.write(f"{i}. **{p}**")
+            else:
+                st.info("Select at least 2 products")
