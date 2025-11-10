@@ -39,14 +39,14 @@ class HistoricalDataManager:
             self.is_first_run = True
     
     def save_kpi_results(self, results, timestamp=None):
-    """Save KPI analysis results with size optimization"""
-    try:
-        if results is None or 'yearly' not in results:
-            return False
+        """Save KPI analysis results with size optimization"""
+        try:
+            if results is None or 'yearly' not in results:
+                return False
+                
+            if timestamp is None:
+                timestamp = datetime.now()
             
-        if timestamp is None:
-            timestamp = datetime.now()
-        
         history = self.load_kpi_history()
         
         # IMPORTANT: Only save essential data, not full DataFrames
@@ -995,6 +995,7 @@ with tab2:
                 )
     
     
+
 
 
 
