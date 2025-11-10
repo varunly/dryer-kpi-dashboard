@@ -16,27 +16,25 @@ from datetime import datetime
 import pandas as pd
 import numpy as np
 
+# This is the COMPLETE HistoricalDataManager class with proper try/except blocks
+# Replace the ENTIRE class in dryer_kpi_app.py with this:
+
 class HistoricalDataManager:
     def __init__(self, storage_path="dryer_historical_data"):
         """Initialize historical data manager"""
         self.storage_path = storage_path
         self.is_first_run = False
         
-        # Try to create storage directory
         if not os.path.exists(storage_path):
             try:
                 os.makedirs(storage_path)
                 self.is_first_run = True
-            except:
+            except:  # Added missing except block
                 import tempfile
                 self.storage_path = tempfile.gettempdir()
         
         self.kpi_file = os.path.join(self.storage_path, "kpi_history.pkl")
         self.optimization_file = os.path.join(self.storage_path, "optimization_history.pkl")
-        
-        # Check if this is first time running
-        if not os.path.exists(self.kpi_file):
-            self.is_first_run = True
     
     def save_kpi_results(self, results, timestamp=None):
         """Save KPI analysis results with size optimization"""
@@ -47,163 +45,132 @@ class HistoricalDataManager:
             if timestamp is None:
                 timestamp = datetime.now()
             
-        history = self.load_kpi_history()
-        
-        # IMPORTANT: Only save essential data, not full DataFrames
-        yearly_data = results.get('yearly')
-        summary_data = results.get('summary')
-        
-        if yearly_data is not None and not yearly_data.empty:
-            # Convert DataFrames to smaller dictionaries
-            entry = {
-                'timestamp': timestamp,
-                # Don't save full DataFrames - just aggregated data
-                'products': yearly_data['Produkt'].unique().tolist(),
-                'zones': yearly_data['Zone'].unique().tolist(),
-                'total_energy': float(yearly_data['Energy_kWh'].sum()),
-                'avg_efficiency': float(yearly_data['kWh_per_m3'].mean()),
-                'total_volume': float(yearly_data['Volume_m3'].sum()),
-                # Save summary statistics instead of full data
-                'yearly_summary': yearly_data.groupby(['Produkt', 'Zone']).agg({
-                    'Energy_kWh': 'sum',
-                    'Volume_m3': 'sum',
-                    'kWh_per_m3': 'mean'
-                }).reset_index().to_dict('records'),  # Convert to dict
-            }
+            history = self.load_kpi_history()
             
-            history.append(entry)
+            yearly_data = results.get('yearly')
             
-            # Keep only last 30 entries (reduced from 100)
-            if len(history) > 30:
-                history = history[-30:]
+            if yearly_data is not None and not yearly_data.empty:
+                # Convert DataFrames to smaller dictionaries
+                entry = {
+                    'timestamp': timestamp,
+                    'products': yearly_data['Produkt'].unique().tolist(),
+                    'zones': yearly_data['Zone'].unique().tolist(),
+                    'total_energy': float(yearly_data['Energy_kWh'].sum()),
+                    'avg_efficiency': float(yearly_data['kWh_per_m3'].mean()),
+                    'total_volume': float(yearly_data['Volume_m3'].sum()),
+                    'yearly_summary': yearly_data.groupby(['Produkt', 'Zone']).agg({
+                        'Energy_kWh': 'sum',
+                        'Volume_m3': 'sum',
+                        'kWh_per_m3': 'mean'
+                    }).reset_index().to_dict('records')
+                }
+                
+                history.append(entry)
+                
+                # Keep only last 30 entries
+                if len(history) > 30:
+                    history = history[-30:]
+                
+                with open(self.kpi_file, 'wb') as f:
+                    pickle.dump(history, f)
+                
+                return True
+            return False
             
-            with open(self.kpi_file, 'wb') as f:
-                pickle.dump(history, f)
-            
-            return True
-        return False
-        
-    except Exception as e:
-        st.warning(f"Could not save historical data: {str(e)}")
-        return False
+        except Exception as e:
+            st.warning(f"Could not save historical data: {str(e)}")
+            return False
     
     def load_kpi_history(self):
-        """Load KPI history safely"""
+        """Load KPI history"""
         try:
             if os.path.exists(self.kpi_file):
                 with open(self.kpi_file, 'rb') as f:
-                    data = pickle.load(f)
-                    return data if isinstance(data, list) else []
-        except:
+                    return pickle.load(f)
+        except:  # Added except block
             pass
         return []
     
     def get_consolidated_historical_data(self):
-        """Get consolidated historical data - returns None if no history"""
+        """Get consolidated historical data for ALL products"""
         try:
             history = self.load_kpi_history()
             
             if not history:
                 return None
             
-            # Collect all valid yearly data
-            all_yearly_data = []
+            all_summaries = []
             for entry in history:
-                if entry and 'yearly' in entry and entry['yearly'] is not None:
-                    try:
-                        yearly_df = entry['yearly'].copy()
-                        if not yearly_df.empty:
-                            yearly_df['analysis_date'] = entry.get('timestamp', datetime.now())
-                            all_yearly_data.append(yearly_df)
-                    except:
-                        continue
+                if 'yearly_summary' in entry and entry['yearly_summary']:
+                    summary_df = pd.DataFrame(entry['yearly_summary'])
+                    summary_df['analysis_date'] = entry.get('timestamp', datetime.now())
+                    all_summaries.append(summary_df)
             
-            if not all_yearly_data:
+            if not all_summaries:
                 return None
-                
-            # Combine all data
-            combined = pd.concat(all_yearly_data, ignore_index=True)
+            
+            combined = pd.concat(all_summaries, ignore_index=True)
             
             if combined.empty:
                 return None
             
-            # Create consolidated summary
             consolidated = combined.groupby(['Produkt', 'Zone']).agg({
                 'Energy_kWh': 'sum',
-                'Volume_m3': 'sum'
+                'Volume_m3': 'sum',
+                'kWh_per_m3': 'mean'
             }).reset_index()
             
-            # Calculate KPI safely
-            consolidated['kWh_per_m3'] = np.where(
-                consolidated['Volume_m3'] > 0,
-                consolidated['Energy_kWh'] / consolidated['Volume_m3'],
-                0
+            # Recalculate kWh_per_m3
+            mask = consolidated['Volume_m3'] > 0
+            consolidated.loc[mask, 'kWh_per_m3'] = (
+                consolidated.loc[mask, 'Energy_kWh'] / 
+                consolidated.loc[mask, 'Volume_m3']
             )
-            
-            # Add sample count for confidence
-            sample_counts = combined.groupby(['Produkt', 'Zone']).size().reset_index(name='sample_count')
-            consolidated = consolidated.merge(sample_counts, on=['Produkt', 'Zone'], how='left')
-            consolidated['confidence'] = np.minimum(consolidated['sample_count'] / 10, 1.0)
             
             return consolidated
             
         except Exception as e:
-            print(f"Error consolidating historical data: {str(e)}")
+            print(f"Error consolidating: {str(e)}")
             return None
     
     def merge_with_current_data(self, current_yearly, weight_historical=0.3):
-        """Merge historical with current data - handles no history case"""
+        """Merge historical data with current analysis"""
         if current_yearly is None or current_yearly.empty:
             return current_yearly, "No current data to merge"
         
         try:
             historical = self.get_consolidated_historical_data()
             
-            # If no historical data, return current as-is
             if historical is None or historical.empty:
                 return current_yearly, "No historical data available (using current data only)"
             
-            # Merge with historical
             merged = current_yearly.merge(
-                historical[['Produkt', 'Zone', 'kWh_per_m3', 'confidence']],
-                on=['Produkt', 'Zone'],
-                how='left',
-                suffixes=('_current', '_historical')
+                historical[['Produkt', 'Zone', 'kWh_per_m3']].add_suffix('_hist'),
+                left_on=['Produkt', 'Zone'],
+                right_on=['Produkt_hist', 'Zone_hist'],
+                how='left'
             )
             
-            # Calculate weighted average only where historical exists
-            def calculate_weighted_kpi(row):
-                current_val = row.get('kWh_per_m3_current', row.get('kWh_per_m3', 0))
-                hist_val = row.get('kWh_per_m3_historical')
-                
-                if pd.notna(hist_val) and hist_val > 0:
-                    confidence = row.get('confidence', 1.0)
-                    weighted = (current_val * (1 - weight_historical) + 
-                              hist_val * weight_historical * confidence)
-                    return weighted
-                return current_val
-            
-            merged['kWh_per_m3'] = merged.apply(calculate_weighted_kpi, axis=1)
+            # Calculate weighted average where historical exists
+            has_hist = merged['kWh_per_m3_hist'].notna()
+            merged.loc[has_hist, 'kWh_per_m3'] = (
+                merged.loc[has_hist, 'kWh_per_m3'] * (1 - weight_historical) +
+                merged.loc[has_hist, 'kWh_per_m3_hist'] * weight_historical
+            )
             
             # Clean up columns
-            final_columns = ['Produkt', 'Zone', 'Energy_kWh', 'Volume_m3', 'kWh_per_m3']
-            result = merged[[col for col in final_columns if col in merged.columns]].copy()
+            merged = merged[['Produkt', 'Zone', 'Energy_kWh', 'Volume_m3', 'kWh_per_m3']]
             
-            # Count enhanced records
-            products_with_history = merged['kWh_per_m3_historical'].notna().sum()
+            products_with_history = has_hist.sum()
+            status = f"Enhanced with historical data ({products_with_history} records)"
             
-            if products_with_history > 0:
-                status = f"✅ Enhanced with historical data ({products_with_history} records)"
-            else:
-                status = "📊 Using current data only (building history...)"
-            
-            return result, status
+            return merged, status
             
         except Exception as e:
-            return current_yearly, f"Could not merge data: {str(e)}"
+            return current_yearly, f"Could not merge: {str(e)}"
     
     def save_optimization_result(self, products, optimal_order, metrics):
-        """Save optimization results safely"""
+        """Save optimization results"""
         try:
             history = self.load_optimization_history()
             
@@ -218,8 +185,8 @@ class HistoricalDataManager:
             
             history.append(entry)
             
-            if len(history) > 50:
-                history = history[-50:]
+            if len(history) > 30:
+                history = history[-30:]
             
             with open(self.optimization_file, 'wb') as f:
                 pickle.dump(history, f)
@@ -228,32 +195,32 @@ class HistoricalDataManager:
             print(f"Could not save optimization: {str(e)}")
     
     def load_optimization_history(self):
-        """Load optimization history safely"""
+        """Load optimization history"""
         try:
             if os.path.exists(self.optimization_file):
                 with open(self.optimization_file, 'rb') as f:
-                    data = pickle.load(f)
-                    return data if isinstance(data, list) else []
-        except:
+                    return pickle.load(f)
+        except:  # Added except block
             pass
         return []
     
     def get_status_message(self):
         """Get informative status message about historical data"""
-        history = self.load_kpi_history()
-        
-        if not history:
-            return "🆕 No historical data yet. Run your first analysis to start building history!"
-        
-        latest = history[-1]['timestamp']
-        age = datetime.now() - latest
-        
-        if len(history) < 5:
-            return f"📊 Building history... ({len(history)} analyses recorded)"
-        elif len(history) < 20:
-            return f"📈 Good progress! {len(history)} analyses recorded (latest: {age.days} days ago)"
-        else:
-            return f"✅ Rich history: {len(history)} analyses (latest: {age.days} days ago)"
+        try:
+            history = self.load_kpi_history()
+            
+            if not history:
+                return "🆕 No historical data yet. Run your first analysis to start!"
+            
+            latest = history[-1]['timestamp']
+            age = datetime.now() - latest
+            
+            if len(history) < 5:
+                return f"📊 Building history... ({len(history)} analyses)"
+            else:
+                return f"✅ {len(history)} analyses (latest: {age.days}d ago)"
+        except:  # Added except block
+            return "📊 Historical data available"
 
 # Initialize the historical data manager
 hdm = HistoricalDataManager()
@@ -995,6 +962,7 @@ with tab2:
                 )
     
     
+
 
 
 
