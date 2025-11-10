@@ -39,43 +39,53 @@ class HistoricalDataManager:
             self.is_first_run = True
     
     def save_kpi_results(self, results, timestamp=None):
-        """Save KPI analysis results safely"""
-        try:
-            if results is None or 'yearly' not in results:
-                return False
-                
-            if timestamp is None:
-                timestamp = datetime.now()
-            
-            history = self.load_kpi_history()
-            
-            # Extract data safely
-            yearly_data = results.get('yearly')
-            if yearly_data is not None and not yearly_data.empty:
-                entry = {
-                    'timestamp': timestamp,
-                    'summary': results.get('summary'),
-                    'yearly': yearly_data,
-                    'products': yearly_data['Produkt'].unique().tolist(),
-                    'total_energy': yearly_data['Energy_kWh'].sum(),
-                    'avg_efficiency': yearly_data['kWh_per_m3'].mean()
-                }
-                
-                history.append(entry)
-                
-                # Keep only last 100 entries
-                if len(history) > 100:
-                    history = history[-100:]
-                
-                with open(self.kpi_file, 'wb') as f:
-                    pickle.dump(history, f)
-                
-                return True
+    """Save KPI analysis results with size optimization"""
+    try:
+        if results is None or 'yearly' not in results:
             return False
             
-        except Exception as e:
-            print(f"Could not save historical data: {str(e)}")
-            return False
+        if timestamp is None:
+            timestamp = datetime.now()
+        
+        history = self.load_kpi_history()
+        
+        # IMPORTANT: Only save essential data, not full DataFrames
+        yearly_data = results.get('yearly')
+        summary_data = results.get('summary')
+        
+        if yearly_data is not None and not yearly_data.empty:
+            # Convert DataFrames to smaller dictionaries
+            entry = {
+                'timestamp': timestamp,
+                # Don't save full DataFrames - just aggregated data
+                'products': yearly_data['Produkt'].unique().tolist(),
+                'zones': yearly_data['Zone'].unique().tolist(),
+                'total_energy': float(yearly_data['Energy_kWh'].sum()),
+                'avg_efficiency': float(yearly_data['kWh_per_m3'].mean()),
+                'total_volume': float(yearly_data['Volume_m3'].sum()),
+                # Save summary statistics instead of full data
+                'yearly_summary': yearly_data.groupby(['Produkt', 'Zone']).agg({
+                    'Energy_kWh': 'sum',
+                    'Volume_m3': 'sum',
+                    'kWh_per_m3': 'mean'
+                }).reset_index().to_dict('records'),  # Convert to dict
+            }
+            
+            history.append(entry)
+            
+            # Keep only last 30 entries (reduced from 100)
+            if len(history) > 30:
+                history = history[-30:]
+            
+            with open(self.kpi_file, 'wb') as f:
+                pickle.dump(history, f)
+            
+            return True
+        return False
+        
+    except Exception as e:
+        st.warning(f"Could not save historical data: {str(e)}")
+        return False
     
     def load_kpi_history(self):
         """Load KPI history safely"""
@@ -985,6 +995,7 @@ with tab2:
                 )
     
     
+
 
 
 
