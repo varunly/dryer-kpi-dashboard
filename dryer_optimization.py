@@ -48,7 +48,7 @@ st.markdown("""
         color: white;
     }
     </style>
-""", unsafe_allow_lang=True)
+""", unsafe_allow_html=True)
 
 # ------------------ Load Optimizer ------------------
 @st.cache_resource
