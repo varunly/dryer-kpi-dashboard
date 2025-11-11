@@ -10,59 +10,178 @@ import plotly.graph_objects as go
 from datetime import datetime, timedelta
 import json
 import os
+import sys
+import numpy as np
+from itertools import permutations
 
-# ------------------ Page Configuration ------------------
-st.set_page_config(
-    page_title="Lindner Dryer - Production Optimizer",
-    page_icon="🔄",
-    layout="wide"
-)
+# ===== FIX IMPORT PATH =====
+# Add parent directory to Python path
+current_dir = os.path.dirname(os.path.abspath(__file__))
+parent_dir = os.path.dirname(current_dir)
+sys.path.insert(0, parent_dir)
+sys.path.insert(0, os.path.join(parent_dir, 'core'))
 
-# ------------------ Custom CSS ------------------
-st.markdown("""
-    <style>
-    .main-title {
-        font-size: 36px;
-        color: #003366;
-        font-weight: 700;
-        text-align: center;
-        margin-bottom: 20px;
-    }
+# Debug info
+print(f"Current dir: {current_dir}")
+print(f"Parent dir: {parent_dir}")
+print(f"Python path: {sys.path}")
+
+# Try importing the optimizer
+try:
+    from simple_optimizer import SimpleProductionOptimizer
+    print("✅ Imported SimpleProductionOptimizer")
+except ImportError as e:
+    print(f"❌ Import failed: {e}")
     
-    .sequence-box {
-        background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
-        padding: 30px;
-        border-radius: 15px;
-        color: white;
-        text-align: center;
-        font-size: 24px;
-        font-weight: 600;
-        margin: 20px 0;
-    }
-    
-    .metric-card {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        padding: 20px;
-        border-radius: 15px;
-        text-align: center;
-        color: white;
-    }
-    </style>
-""", unsafe_allow_html=True)
+    # Embed the optimizer class directly (fallback)
+    class SimpleProductionOptimizer:
+        def __init__(self, database_file="optimization_database.json"):
+            """Load the pre-built optimization database"""
+            
+            # Try multiple paths
+            possible_paths = [
+                database_file,
+                os.path.join(parent_dir, database_file),
+                f"/mount/src/dryer-kpi-dashboard/{database_file}",
+            ]
+            
+            db_file = None
+            for path in possible_paths:
+                if os.path.exists(path):
+                    db_file = path
+                    break
+            
+            if db_file is None:
+                raise FileNotFoundError(f"Cannot find {database_file}")
+            
+            with open(db_file, 'r') as f:
+                self.db = json.load(f)
+            
+            self.profiles = self.db['product_profiles']
+            self.transitions = self.db['transition_matrix']
+            self.rules = self.db['optimization_rules']
+        
+        def optimize(self, products, wagons_per_product=None):
+            """Find optimal production sequence"""
+            if not products or len(products) < 1:
+                return {"error": "No products specified"}
+            
+            if len(products) == 1:
+                return {
+                    "optimal_sequence": products,
+                    "total_transition_cost": 0,
+                    "worst_case_cost": 0,
+                    "savings_percent": 0,
+                    "transitions": [],
+                    "recommendations": [],
+                    "estimated_total_energy": None
+                }
+            
+            # Find optimal sequence
+            if len(products) <= 8:
+                best_seq, best_cost = self._exhaustive_search(products)
+            else:
+                best_seq, best_cost = self._greedy_search(products)
+            
+            # Calculate worst case
+            worst_seq = list(reversed(best_seq))
+            worst_cost = self._calculate_cost(worst_seq)
+            
+            savings = ((worst_cost - best_cost) / worst_cost * 100) if worst_cost > 0 else 0
+            
+            # Transitions
+            transitions = []
+            for i in range(len(best_seq) - 1):
+                transitions.append({
+                    "from": best_seq[i],
+                    "to": best_seq[i+1],
+                    "cost_kwh": self.transitions[best_seq[i]][best_seq[i+1]],
+                    "thickness_change": self.profiles[best_seq[i+1]]['thickness_mm'] - self.profiles[best_seq[i]]['thickness_mm'],
+                    "type_change": self.profiles[best_seq[i]]['type'] != self.profiles[best_seq[i+1]]['type'],
+                    "energy_change": self.profiles[best_seq[i+1]]['avg_kwh_per_m3'] - self.profiles[best_seq[i]]['avg_kwh_per_m3']
+                })
+            
+            # Recommendations
+            recommendations = []
+            for trans in transitions:
+                if trans['cost_kwh'] > 100:
+                    recommendations.append(f"⚠️ High cost transition: {trans['from']} → {trans['to']}")
+                if trans['type_change']:
+                    recommendations.append(f"🔧 Material change: {trans['from']} → {trans['to']} - schedule cleaning")
+            
+            return {
+                "optimal_sequence": best_seq,
+                "total_transition_cost": round(best_cost, 2),
+                "worst_case_cost": round(worst_cost, 2),
+                "savings_percent": round(savings, 1),
+                "transitions": transitions,
+                "recommendations": recommendations,
+                "estimated_total_energy": None
+            }
+        
+        def _exhaustive_search(self, products):
+            """Try all permutations"""
+            best_seq = None
+            best_cost = float('inf')
+            
+            for perm in permutations(products):
+                cost = self._calculate_cost(perm)
+                if cost < best_cost:
+                    best_cost = cost
+                    best_seq = list(perm)
+            
+            return best_seq, best_cost
+        
+        def _greedy_search(self, products):
+            """Greedy nearest neighbor"""
+            remaining = set(products)
+            current = min(remaining, key=lambda p: self.profiles[p]['thickness_mm'])
+            sequence = [current]
+            remaining.remove(current)
+            
+            while remaining:
+                next_prod = min(remaining, key=lambda p: self.transitions[current][p])
+                sequence.append(next_prod)
+                remaining.remove(next_prod)
+                current = next_prod
+            
+            return sequence, self._calculate_cost(sequence)
+        
+        def _calculate_cost(self, sequence):
+            """Calculate total transition cost"""
+            if len(sequence) < 2:
+                return 0
+            return sum(self.transitions[sequence[i]][sequence[i+1]] for i in range(len(sequence)-1))
+        
+        def get_product_info(self, product):
+            """Get product profile"""
+            return self.profiles.get(product, {})
 
-# ------------------ Load Optimizer ------------------
+# ------------------ Load Database ------------------
 @st.cache_resource
 def load_optimizer():
     """Load the optimization database"""
     try:
-        from simple_optimizer import SimpleProductionOptimizer
-        opt = SimpleProductionOptimizer("optimization_database.json")
-        return opt, True
+        # Try multiple database paths
+        possible_paths = [
+            "optimization_database.json",
+            os.path.join(parent_dir, "optimization_database.json"),
+            "/mount/src/dryer-kpi-dashboard/optimization_database.json",
+        ]
+        
+        for path in possible_paths:
+            if os.path.exists(path):
+                opt = SimpleProductionOptimizer(path)
+                print(f"✅ Loaded database from: {path}")
+                return opt, True
+        
+        return None, False
+        
     except Exception as e:
+        print(f"❌ Error loading optimizer: {str(e)}")
         return None, False
 
 optimizer, db_loaded = load_optimizer()
-
 # ------------------ Header ------------------
 st.markdown('<div class="main-title">🔄 Lindner Dryer - Production Optimizer</div>', 
             unsafe_allow_html=True)
