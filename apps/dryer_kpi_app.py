@@ -1,484 +1,310 @@
 """
-Lindner Dryer - KPI Analysis Dashboard
-Analyzes energy efficiency and creates reports
+Lindner Dryer - Simplified KPI Analysis
+Standalone version with all functions embedded
 """
-# Add at the very top after imports
+
 import streamlit as st
 import pandas as pd
+import numpy as np
 import tempfile
 import plotly.express as px
-import plotly.graph_objects as go
-from datetime import datetime
 import os
-import sys
-import numpy as np
-from itertools import permutations
 
-# Fix import path for Streamlit Cloud
-current_file = os.path.abspath(__file__)
-current_dir = os.path.dirname(current_file)
-parent_dir = os.path.dirname(current_dir)
+st.set_page_config(page_title="KPI Analysis", page_icon="📊", layout="wide")
 
-# Add paths
-sys.path.insert(0, parent_dir)
-sys.path.insert(0, os.path.join(parent_dir, 'core'))
+# ===== EMBEDDED CONFIGURATION =====
+CONFIG = {
+    "energy_sheet": 0,
+    "wagon_sheet": "Hordenwagenverfolgung",
+    "wagon_header_row": 6,
+    "gas_to_kwh": 11.5,
+}
 
-# Show debug info
-print(f"Current file: {current_file}")
-print(f"Current dir: {current_dir}")
-print(f"Parent dir: {parent_dir}")
-print(f"Python path: {sys.path}")
+ZONE_MAPPING = {
+    "Z2": "Zone 2",
+    "Z3": "Zone 3",
+    "Z4": "Zone 4",
+    "Z5": "Zone 5"
+}
 
-# Try importing
-try:
-    # Method 1: Direct import from core
-    import core.dryer_kpi_monthly_final as kpi_module
-    parse_energy = kpi_module.parse_energy
-    parse_wagon = kpi_module.parse_wagon
-    explode_intervals = kpi_module.explode_intervals
-    allocate_energy = kpi_module.allocate_energy
-    CONFIG = kpi_module.CONFIG
-    print("✅ Import successful: Method 1 (core.module)")
+# ===== EMBEDDED FUNCTIONS =====
+
+def parse_energy_simple(df):
+    """Parse energy data - simplified"""
+    df = df.copy()
     
-except ImportError as e1:
-    print(f"Method 1 failed: {e1}")
-    try:
-        # Method 2: Add to path and import
-        from dryer_kpi_monthly_final import (
-            parse_energy, parse_wagon, explode_intervals, 
-            allocate_energy, CONFIG
-        )
-        print("✅ Import successful: Method 2 (direct)")
-        
-    except ImportError as e2:
-        print(f"Method 2 failed: {e2}")
-        
-        # Show detailed error
-        st.error(f"""
-        ❌ Cannot import required modules
-        
-        **Debug Info:**
-        - Current file: `{current_file}`
-        - Parent dir: `{parent_dir}`
-        - Error 1: {e1}
-        - Error 2: {e2}
-        
-        **Files in parent directory:**
-        """)
-        
-        try:
-            files = os.listdir(parent_dir)
-            st.write(files)
-            
-            if 'core' in files:
-                core_files = os.listdir(os.path.join(parent_dir, 'core'))
-                st.write("Files in core/:", core_files)
-        except:
-            pass
-        
-        st.stop()
-
-# Add parent directory to path for imports
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-
-try:
-    from core.dryer_kpi_monthly_final import (
-        parse_energy, parse_wagon, explode_intervals, 
-        allocate_energy, CONFIG
-    )
-except ImportError:
-    try:
-        # Fallback for local development
-        from dryer_kpi_monthly_final import (
-            parse_energy, parse_wagon, explode_intervals, 
-            allocate_energy, CONFIG
-        )
-    except ImportError:
-        st.error("❌ Cannot import required modules. Please check file structure.")
-        st.stop()
-
-# ------------------ Page Configuration ------------------
-st.set_page_config(
-    page_title="Lindner Dryer - KPI Analysis",
-    page_icon="📊",
-    layout="wide"
-)
-
-# ------------------ Custom CSS ------------------
-st.markdown("""
-    <style>
-    .main-title {
-        font-size: 36px;
-        color: #003366;
-        font-weight: 700;
-        text-align: center;
-        margin-bottom: 20px;
-    }
+    # Parse timestamp
+    df["Zeitstempel"] = pd.to_datetime(df["Zeitstempel"], errors='coerce')
+    df["Month"] = df["Zeitstempel"].dt.month
     
-    .metric-card {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        padding: 20px;
-        border-radius: 15px;
-        text-align: center;
-        box-shadow: 0 4px 15px rgba(0,0,0,0.2);
-        color: white;
-    }
+    # Convert gas to kWh
+    for zone_key, zone_name in ZONE_MAPPING.items():
+        gas_col = f"Gasmenge, {zone_name} [m³]"
+        if gas_col in df.columns:
+            df[f"E_{zone_name}_kWh"] = df[gas_col] * CONFIG["gas_to_kwh"]
     
-    .metric-card h3 {
-        margin: 0;
-        font-size: 16px;
-        opacity: 0.9;
-    }
-    
-    .metric-card h2 {
-        margin: 10px 0 0 0;
-        font-size: 32px;
-        font-weight: 700;
-    }
-    </style>
-""", unsafe_allow_html=True)
+    return df[df["Zeitstempel"].notna()].copy()
 
-# ------------------ Helper Functions ------------------
-def create_kpi_card(title, value, unit):
-    """Create a styled KPI metric card"""
-    if isinstance(value, (int, float)):
-        formatted_value = f"{value:,.2f}"
+def parse_wagon_simple(df):
+    """Parse wagon data - simplified"""
+    df = df.copy()
+    
+    # Clean column names
+    df.columns = [str(c).replace("\n", " ").strip() for c in df.columns]
+    
+    # Find wagon number column
+    for col in df.columns:
+        if col.startswith("WG-"):
+            df = df.rename(columns={col: "WG_Nr"})
+            break
+    
+    # Calculate volume
+    if "m³" in df.columns:
+        df["m3"] = pd.to_numeric(df["m³"], errors='coerce')
     else:
-        formatted_value = str(value)
+        if "Stärke" in df.columns:
+            staerke = pd.to_numeric(df["Stärke"], errors='coerce').fillna(36)
+            df["m3"] = 0.605 * 0.605 * (staerke + 7) / 1000
+        else:
+            df["m3"] = 0.605 * 0.605 * (36 + 7) / 1000
     
-    return f'''
-    <div class="metric-card">
-        <h3>{title}</h3>
-        <h2>{formatted_value} {unit}</h2>
-    </div>
-    '''
+    # Add month if timestamp exists
+    if "Pressen-Datum" in df.columns or "Press-Zeit" in df.columns:
+        try:
+            df["Month"] = pd.to_datetime(df.get("Pressen-Datum", ""), errors='coerce').dt.month
+        except:
+            df["Month"] = 1
+    else:
+        df["Month"] = 1
+    
+    return df
 
-def run_kpi_analysis(energy_path, wagon_path, products_filter, month_filter):
-    """Run KPI analysis with error handling"""
-    progress_bar = st.progress(0)
-    status_text = st.empty()
+def simple_kpi_analysis(energy_df, wagon_df, products_filter=None, month_filter=None):
+    """Simple KPI calculation"""
     
-    try:
-        # Step 1: Parse energy data
-        status_text.text("🔄 Parsing energy data...")
-        progress_bar.progress(20)
+    # Parse data
+    energy = parse_energy_simple(energy_df)
+    wagons = parse_wagon_simple(wagon_df)
+    
+    # Apply filters
+    if products_filter and "Produkt" in wagons.columns:
+        wagons = wagons[wagons["Produkt"].isin(products_filter)]
+    
+    if month_filter and "Month" in wagons.columns:
+        wagons = wagons[wagons["Month"] == month_filter]
+    
+    if month_filter and "Month" in energy.columns:
+        energy = energy[energy["Month"] == month_filter]
+    
+    # Calculate KPIs by product and zone
+    results = []
+    
+    if "Produkt" not in wagons.columns:
+        return None
+    
+    for product in wagons["Produkt"].dropna().unique():
+        product_wagons = wagons[wagons["Produkt"] == product]
+        total_volume = product_wagons["m3"].sum()
+        wagon_count = len(product_wagons)
         
-        try:
-            e_raw = pd.read_excel(energy_path, sheet_name=CONFIG["energy_sheet"])
-            e = parse_energy(e_raw)
-            st.sidebar.success(f"✅ Loaded {len(e)} energy records")
-        except Exception as e_error:
-            return {'success': False, 'error': f"Energy file error: {str(e_error)}"}
-        
-        # Step 2: Parse wagon data
-        status_text.text("🔄 Parsing wagon tracking data...")
-        progress_bar.progress(40)
-        
-        try:
-            w_raw = pd.read_excel(
-                wagon_path, 
-                sheet_name=CONFIG["wagon_sheet"], 
-                header=CONFIG["wagon_header_row"]
-            )
-            w = parse_wagon(w_raw)
-            st.sidebar.success(f"✅ Loaded {len(w)} wagon records")
-        except Exception as w_error:
-            return {'success': False, 'error': f"Wagon file error: {str(w_error)}"}
-        
-        # Step 3: Apply filters
-        status_text.text("🔄 Applying filters...")
-        progress_bar.progress(60)
-        
-        if products_filter:
-            w = w[w["Produkt"].astype(str).isin(products_filter)]
-            st.sidebar.info(f"Filtered to {len(w)} wagon records")
-        
-        if month_filter:
-            e = e[e["Month"] == month_filter]
-            w = w[w["Month"] == month_filter]
-            st.sidebar.info(f"Filtered to month {month_filter}")
-        
-        if len(w) == 0:
-            return {'success': False, 'error': 'No wagon data after filtering'}
-        
-        # Step 4: Process intervals
-        status_text.text("🔄 Processing intervals...")
-        progress_bar.progress(70)
-        
-        try:
-            ivals = explode_intervals(w)
-            if len(ivals) == 0:
-                return {'success': False, 'error': 'No intervals created from wagon data'}
-        except Exception as i_error:
-            return {'success': False, 'error': f"Interval processing error: {str(i_error)}"}
-        
-        # Step 5: Allocate energy
-        status_text.text("🔄 Allocating energy...")
-        progress_bar.progress(85)
-        
-        try:
-            alloc = allocate_energy(e, ivals)
-            if len(alloc) == 0:
-                return {'success': False, 'error': 'No energy allocation results'}
-        except Exception as a_error:
-            return {'success': False, 'error': f"Energy allocation error: {str(a_error)}"}
-        
-        # Step 6: Create summaries
-        status_text.text("🔄 Creating summaries...")
-        progress_bar.progress(95)
-        
-        try:
-            summary = alloc.groupby(["Month", "Produkt", "Zone"], as_index=False).agg(
-                Energy_kWh=("Energy_share_kWh", "sum"),
-                Volume_m3=("m3", "sum")
-            )
-            summary["kWh_per_m3"] = summary["Energy_kWh"] / summary["Volume_m3"].replace(0, pd.NA)
+        for zone_key, zone_name in ZONE_MAPPING.items():
+            energy_col = f"E_{zone_name}_kWh"
             
-            yearly = summary.groupby(["Produkt", "Zone"], as_index=False).agg(
-                Energy_kWh=("Energy_kWh", "sum"),
-                Volume_m3=("Volume_m3", "sum")
-            )
-            yearly["kWh_per_m3"] = yearly["Energy_kWh"] / yearly["Volume_m3"].replace(0, pd.NA)
-        except Exception as s_error:
-            return {'success': False, 'error': f"Summary creation error: {str(s_error)}"}
-        
-        progress_bar.progress(100)
-        status_text.text("✅ Analysis complete!")
-        
-        # Clear progress indicators
-        import time
-        time.sleep(0.5)
-        progress_bar.empty()
-        status_text.empty()
-        
-        return {
-            'summary': summary,
-            'yearly': yearly,
-            'success': True
-        }
-        
-    except Exception as e:
-        progress_bar.empty()
-        status_text.empty()
-        return {'success': False, 'error': f"Unexpected error: {str(e)}"}
+            if energy_col in energy.columns:
+                total_energy = energy[energy_col].sum()
+                
+                # Simple allocation: proportional to volume
+                total_wagon_volume = wagons["m3"].sum()
+                if total_wagon_volume > 0:
+                    product_energy = total_energy * (total_volume / total_wagon_volume)
+                else:
+                    product_energy = 0
+                
+                results.append({
+                    'Produkt': product,
+                    'Zone': zone_key,
+                    'Energy_kWh': product_energy,
+                    'Volume_m3': total_volume,
+                    'Wagons': wagon_count,
+                    'kWh_per_m3': product_energy / total_volume if total_volume > 0 else 0
+                })
+    
+    return pd.DataFrame(results)
 
-# ------------------ Header ------------------
-st.markdown('<div class="main-title">📊 Lindner Dryer - KPI Analysis</div>', 
-            unsafe_allow_html=True)
+# ===== UI =====
 
-st.info("Upload your energy and wagon files to analyze dryer efficiency")
+st.title("📊 Lindner Dryer - KPI Analysis")
+st.info("Upload your files to analyze energy efficiency")
 
-# ------------------ Sidebar ------------------
+# Sidebar
 with st.sidebar:
     st.image("https://www.karrieretag.org/wp-content/uploads/2023/10/lindner-logo-1.png", 
-             use_column_width=True)
+             use_container_width=True)
     st.markdown("---")
     
     st.subheader("📁 Upload Files")
-    energy_file = st.file_uploader("Energy File (.xlsx)", type=["xlsx"], key="energy_upload")
-    wagon_file = st.file_uploader("Hordenwagen File (.xlsm, .xlsx)", type=["xlsm", "xlsx"], key="wagon_upload")
+    energy_file = st.file_uploader("Energy File (.xlsx)", type=["xlsx"], key="energy")
+    wagon_file = st.file_uploader("Wagon File (.xlsm, .xlsx)", type=["xlsm", "xlsx"], key="wagon")
     
     st.markdown("---")
     st.subheader("⚙️ Filters")
     
-    all_products = ["L28", "L30", "L32", "L34", "L36", "L38", "L40", "L44", "N40", "N44", "U36"]
+    products_list = ["L28", "L30", "L32", "L34", "L36", "L38", "L40", "L44", "N40", "N44", "U36"]
     
     select_all = st.checkbox("Select All Products", value=True, key="select_all")
     
     if select_all:
-        products = all_products
-        st.multiselect("Products:", all_products, default=all_products, disabled=True, key="prod_disabled")
+        selected_products = products_list
+        st.multiselect("Products:", products_list, default=products_list, disabled=True, key="products_disabled")
     else:
-        products = st.multiselect("Products:", all_products, default=["L36"], key="prod_manual")
+        selected_products = st.multiselect("Products:", products_list, default=["L36"], key="products_manual")
     
-    st.info(f"Selected: {len(products)} products")
+    st.info(f"Selected: {len(selected_products)} products")
     
-    month = st.number_input("Month (0 = all):", 0, 12, 0, key="month_filter")
+    month = st.number_input("Month (0 = all):", 0, 12, 0, key="month")
     
     st.markdown("---")
-    run_button = st.button("▶️ Run Analysis", use_container_width=True, type="primary")
+    analyze_btn = st.button("▶️ Run Analysis", use_container_width=True, type="primary")
 
-# ------------------ Main Analysis ------------------
-if run_button:
+# Main analysis
+if analyze_btn:
     if not energy_file or not wagon_file:
         st.error("⚠️ Please upload both files")
     else:
-        # Clear any previous results
-        if 'results' in st.session_state:
-            del st.session_state['results']
-        
-        # Create temporary files
-        try:
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp_e, \
-                 tempfile.NamedTemporaryFile(delete=False, suffix=".xlsm") as tmp_w:
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as tmp_e, \
+             tempfile.NamedTemporaryFile(suffix=".xlsm", delete=False) as tmp_w:
+            
+            # Save uploads to temp files
+            tmp_e.write(energy_file.read())
+            tmp_w.write(wagon_file.read())
+            tmp_e.flush()
+            tmp_w.flush()
+            
+            try:
+                # Progress
+                progress = st.progress(0)
+                status = st.empty()
                 
-                # Write uploaded files to temp
-                tmp_e.write(energy_file.read())
-                tmp_w.write(wagon_file.read())
-                tmp_e.flush()
-                tmp_w.flush()
+                # Load files
+                status.text("📊 Loading energy data...")
+                progress.progress(25)
+                energy_df = pd.read_excel(tmp_e.name, sheet_name=CONFIG["energy_sheet"])
                 
-                # Run analysis
-                with st.spinner("Running analysis..."):
-                    results = run_kpi_analysis(
-                        tmp_e.name,
-                        tmp_w.name,
-                        products if products else None,
-                        month if month != 0 else None
-                    )
+                status.text("🚛 Loading wagon data...")
+                progress.progress(50)
+                wagon_df = pd.read_excel(
+                    tmp_w.name,
+                    sheet_name=CONFIG["wagon_sheet"],
+                    header=CONFIG["wagon_header_row"]
+                )
                 
+                # Analyze
+                status.text("🔄 Calculating KPIs...")
+                progress.progress(75)
+                
+                results_df = simple_kpi_analysis(
+                    energy_df,
+                    wagon_df,
+                    selected_products if selected_products else None,
+                    month if month != 0 else None
+                )
+                
+                progress.progress(100)
+                status.empty()
+                progress.empty()
+                
+                if results_df is None or results_df.empty:
+                    st.warning("⚠️ No data found. Please check your filters and files.")
+                else:
+                    st.success("✅ Analysis complete!")
+                    
+                    # Summary KPIs
+                    st.markdown("### 📈 Key Performance Indicators")
+                    
+                    col1, col2, col3 = st.columns(3)
+                    
+                    total_energy = results_df['Energy_kWh'].sum()
+                    total_volume = results_df['Volume_m3'].sum()
+                    avg_kpi = results_df['kWh_per_m3'].mean()
+                    
+                    col1.metric("Total Energy", f"{total_energy:,.0f} kWh")
+                    col2.metric("Total Volume", f"{total_volume:,.0f} m³")
+                    col3.metric("Avg Efficiency", f"{avg_kpi:.2f} kWh/m³")
+                    
+                    # Charts
+                    st.markdown("### 📊 Analysis Charts")
+                    
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        # Group by zone and product
+                        fig1 = px.bar(
+                            results_df,
+                            x="Zone",
+                            y="kWh_per_m3",
+                            color="Produkt",
+                            title="Energy Efficiency by Zone & Product",
+                            barmode="group"
+                        )
+                        fig1.update_layout(height=400)
+                        st.plotly_chart(fig1, use_container_width=True)
+                    
+                    with col2:
+                        # Pie chart
+                        fig2 = px.pie(
+                            results_df,
+                            values="Energy_kWh",
+                            names="Produkt",
+                            title="Energy Distribution by Product"
+                        )
+                        fig2.update_layout(height=400)
+                        st.plotly_chart(fig2, use_container_width=True)
+                    
+                    # Data table
+                    with st.expander("📋 View Detailed Data"):
+                        st.dataframe(
+                            results_df.style.format({
+                                'Energy_kWh': '{:,.2f}',
+                                'Volume_m3': '{:,.2f}',
+                                'kWh_per_m3': '{:,.2f}',
+                                'Wagons': '{:,.0f}'
+                            }),
+                            use_container_width=True
+                        )
+                    
+                    # Export
+                    st.markdown("### 📥 Export Results")
+                    
+                    # Excel export
+                    output_file = "kpi_results.xlsx"
+                    with pd.ExcelWriter(output_file, engine='xlsxwriter') as writer:
+                        results_df.to_excel(writer, sheet_name='KPI_Results', index=False)
+                    
+                    with open(output_file, 'rb') as f:
+                        st.download_button(
+                            "📥 Download Excel Report",
+                            f.read(),
+                            output_file,
+                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            use_container_width=True
+                        )
+                    
+                    # Cleanup
+                    os.unlink(output_file)
+                
+            except Exception as e:
+                st.error(f"❌ Error during analysis: {str(e)}")
+                
+                with st.expander("🔍 Error Details"):
+                    st.exception(e)
+            
+            finally:
                 # Cleanup temp files
                 try:
                     os.unlink(tmp_e.name)
                     os.unlink(tmp_w.name)
                 except:
                     pass
-                
-                # Check results
-                if not results['success']:
-                    st.error(f"❌ Analysis failed: {results['error']}")
-                    
-                    with st.expander("🔍 Troubleshooting Tips"):
-                        st.markdown("""
-                        **Common Issues:**
-                        
-                        1. **Energy file error**: Check that your energy file has the correct format
-                        2. **Wagon file error**: Ensure the Hordenwagen file has data starting at row 7
-                        3. **No data after filtering**: Try selecting all products and all months
-                        4. **No intervals created**: Check that wagon data has valid timestamps
-                        
-                        **Quick Fixes:**
-                        - Select "All Products"
-                        - Set Month to "0" (all months)
-                        - Verify your files are not corrupted
-                        - Check that files contain data for 2025
-                        """)
-                else:
-                    summary = results['summary']
-                    yearly = results['yearly']
-                    
-                    if yearly.empty:
-                        st.warning("⚠️ No data found with selected filters")
-                        st.info("Try selecting all products and all months")
-                    else:
-                        # Store in session state
-                        st.session_state['results'] = results
-                        
-                        # KPI Cards
-                        st.markdown("### 📈 Key Performance Indicators")
-                        
-                        total_energy = yearly["Energy_kWh"].sum()
-                        avg_kpi = yearly["kWh_per_m3"].mean()
-                        total_volume = yearly["Volume_m3"].sum()
-                        
-                        col1, col2, col3 = st.columns(3)
-                        with col1:
-                            st.markdown(create_kpi_card("Total Energy", total_energy, "kWh"), 
-                                       unsafe_allow_html=True)
-                        with col2:
-                            st.markdown(create_kpi_card("Avg Efficiency", avg_kpi, "kWh/m³"), 
-                                       unsafe_allow_html=True)
-                        with col3:
-                            st.markdown(create_kpi_card("Total Volume", total_volume, "m³"), 
-                                       unsafe_allow_html=True)
-                        
-                        # Charts
-                        st.markdown("### 📊 Analysis Charts")
-                        
-                        col1, col2 = st.columns(2)
-                        
-                        with col1:
-                            fig1 = px.bar(
-                                yearly,
-                                x="Zone",
-                                y="kWh_per_m3",
-                                color="Produkt",
-                                title="Energy Efficiency by Zone",
-                                text_auto=".1f"
-                            )
-                            fig1.update_layout(height=400, plot_bgcolor='white')
-                            st.plotly_chart(fig1, use_container_width=True)
-                        
-                        with col2:
-                            fig2 = px.pie(
-                                yearly,
-                                values="Energy_kWh",
-                                names="Produkt",
-                                title="Energy Distribution"
-                            )
-                            fig2.update_layout(height=400)
-                            st.plotly_chart(fig2, use_container_width=True)
-                        
-                        # Monthly trend (if available)
-                        if not summary.empty and "Month" in summary.columns and summary["Month"].nunique() > 1:
-                            st.markdown("### 📉 Monthly Trends")
-                            fig3 = px.line(
-                                summary,
-                                x="Month",
-                                y="kWh_per_m3",
-                                color="Zone",
-                                markers=True,
-                                title="Efficiency Over Time"
-                            )
-                            fig3.update_layout(height=400, plot_bgcolor='white')
-                            st.plotly_chart(fig3, use_container_width=True)
-                        
-                        # Data tables
-                        with st.expander("📋 View Data Tables"):
-                            tab1, tab2 = st.tabs(["Yearly Summary", "Monthly Detail"])
-                            
-                            with tab1:
-                                st.dataframe(
-                                    yearly.style.format({
-                                        "Energy_kWh": "{:,.2f}",
-                                        "Volume_m3": "{:,.2f}",
-                                        "kWh_per_m3": "{:,.2f}"
-                                    }),
-                                    use_container_width=True
-                                )
-                            
-                            with tab2:
-                                st.dataframe(
-                                    summary.style.format({
-                                        "Energy_kWh": "{:,.2f}",
-                                        "Volume_m3": "{:,.2f}",
-                                        "kWh_per_m3": "{:,.2f}"
-                                    }),
-                                    use_container_width=True
-                                )
-                        
-                        # Export
-                        st.markdown("### 📥 Export Results")
-                        
-                        try:
-                            output_file = "KPI_Analysis_Results.xlsx"
-                            with pd.ExcelWriter(output_file, engine="xlsxwriter") as writer:
-                                yearly.to_excel(writer, sheet_name="Yearly_Summary", index=False)
-                                summary.to_excel(writer, sheet_name="Monthly_Detail", index=False)
-                            
-                            with open(output_file, "rb") as f:
-                                st.download_button(
-                                    "📥 Download Excel Report",
-                                    f.read(),
-                                    output_file,
-                                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                                    use_container_width=True
-                                )
-                            
-                            # Clean up output file
-                            if os.path.exists(output_file):
-                                os.unlink(output_file)
-                                
-                        except Exception as export_error:
-                            st.warning(f"Could not create download file: {str(export_error)}")
-                        
-                        st.success("✅ Analysis complete!")
-        
-        except Exception as e:
-            st.error(f"❌ Unexpected error: {str(e)}")
-            
-            with st.expander("🔍 Error Details"):
-                st.exception(e)
 
 else:
     # Instructions
@@ -486,49 +312,38 @@ else:
     ## 🚀 How to Use
     
     1. **Upload Files** in the sidebar:
-       - Energy consumption file (hourly data)
-       - Hordenwagen tracking file
+       - Energy consumption file (.xlsx)
+       - Hordenwagen tracking file (.xlsm or .xlsx)
     
-    2. **Select Products** to analyze (or use "Select All")
+    2. **Select Products** to analyze (or "Select All")
     
-    3. **Optional:** Filter by month (0 = all months)
+    3. **Optional:** Filter by specific month (1-12) or 0 for all
     
     4. **Click "Run Analysis"**
     
-    ### 📊 What You'll Get:
+    ---
     
-    - ✅ Energy efficiency metrics (kWh/m³)
-    - ✅ Zone-by-zone analysis
-    - ✅ Product comparisons
-    - ✅ Monthly trends
+    ## 📊 What You'll Get:
+    
+    - ✅ Total energy consumption
+    - ✅ Energy efficiency (kWh/m³) per product and zone
+    - ✅ Volume analysis
+    - ✅ Visual charts and comparisons
     - ✅ Downloadable Excel report
-    
-    ### 📁 File Requirements:
-    
-    **Energy File (.xlsx):**
-    - Hourly energy consumption data
-    - Columns: Zeitstempel, Gasmenge Zone 2-5, etc.
-    
-    **Hordenwagen File (.xlsm or .xlsx):**
-    - Wagon tracking data
-    - Header row should start at row 7
-    - Columns: WG-Nr, Produkt, Press-Zeit, etc.
     
     ---
     
-    **Need production order optimization?**  
-    Use the separate [Optimization App](https://dryer-production-optimizer.streamlit.app)
+    ### 📁 File Requirements:
+    
+    **Energy File:**
+    - Hourly energy data
+    - Columns: Zeitstempel, Gasmenge Zone 2-5
+    
+    **Wagon File:**
+    - Production tracking data
+    - Header starts at row 7
+    - Columns: WG-Nr, Produkt, Stärke, etc.
     """)
 
-# Add debug info in sidebar
-with st.sidebar:
-    st.markdown("---")
-    if st.checkbox("Show Debug Info", value=False):
-        st.write("**Session State:**")
-        st.write(f"Has results: {'results' in st.session_state}")
-        
-        st.write("**File Upload Status:**")
-        st.write(f"Energy file: {'✅' if energy_file else '❌'}")
-        st.write(f"Wagon file: {'✅' if wagon_file else '❌'}")
-
-
+st.markdown("---")
+st.caption("🏭 Lindner Dryer KPI Analysis - Simplified Version")
