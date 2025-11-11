@@ -1,237 +1,280 @@
 """
 Lindner Dryer - Production Order Optimizer
-Uses pre-built database for instant optimization
+Standalone version with embedded optimizer
 """
 
 import streamlit as st
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-from datetime import datetime, timedelta
+from datetime import datetime
 import json
 import os
-import sys
 import numpy as np
 from itertools import permutations
 
-# ===== FIX IMPORT PATH =====
-# Add parent directory to Python path
-current_dir = os.path.dirname(os.path.abspath(__file__))
-parent_dir = os.path.dirname(current_dir)
-sys.path.insert(0, parent_dir)
-sys.path.insert(0, os.path.join(parent_dir, 'core'))
+# ------------------ Page Configuration ------------------
+st.set_page_config(
+    page_title="Lindner Dryer - Production Optimizer",
+    page_icon="🔄",
+    layout="wide"
+)
 
-# Debug info
-print(f"Current dir: {current_dir}")
-print(f"Parent dir: {parent_dir}")
-print(f"Python path: {sys.path}")
-
-# Try importing the optimizer
-try:
-    from simple_optimizer import SimpleProductionOptimizer
-    print("✅ Imported SimpleProductionOptimizer")
-except ImportError as e:
-    print(f"❌ Import failed: {e}")
+# ------------------ Custom CSS ------------------
+st.markdown("""
+    <style>
+    .main-title {
+        font-size: 36px;
+        color: #003366;
+        font-weight: 700;
+        text-align: center;
+        margin-bottom: 20px;
+    }
     
-    # Embed the optimizer class directly (fallback)
-    class SimpleProductionOptimizer:
-        def __init__(self, database_file="optimization_database.json"):
-            """Load the pre-built optimization database"""
-            
-            # Try multiple paths
-            possible_paths = [
-                database_file,
-                os.path.join(parent_dir, database_file),
-                f"/mount/src/dryer-kpi-dashboard/{database_file}",
-            ]
-            
-            db_file = None
-            for path in possible_paths:
-                if os.path.exists(path):
-                    db_file = path
-                    break
-            
-            if db_file is None:
-                raise FileNotFoundError(f"Cannot find {database_file}")
-            
-            with open(db_file, 'r') as f:
-                self.db = json.load(f)
-            
-            self.profiles = self.db['product_profiles']
-            self.transitions = self.db['transition_matrix']
-            self.rules = self.db['optimization_rules']
+    .sequence-box {
+        background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+        padding: 30px;
+        border-radius: 15px;
+        color: white;
+        text-align: center;
+        font-size: 24px;
+        font-weight: 600;
+        margin: 20px 0;
+    }
+    
+    .metric-card {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        padding: 20px;
+        border-radius: 15px;
+        text-align: center;
+        color: white;
+    }
+    </style>
+""", unsafe_allow_html=True)
+
+# ------------------ EMBEDDED OPTIMIZER CLASS ------------------
+class ProductionOptimizer:
+    def __init__(self, database):
+        """Initialize with database dict"""
+        self.db = database
+        self.profiles = database['product_profiles']
+        self.transitions = database['transition_matrix']
+        self.rules = database.get('optimization_rules', {})
+    
+    def optimize(self, products, wagons_per_product=None):
+        """Find optimal production sequence"""
+        if not products or len(products) < 1:
+            return {"error": "No products specified"}
         
-        def optimize(self, products, wagons_per_product=None):
-            """Find optimal production sequence"""
-            if not products or len(products) < 1:
-                return {"error": "No products specified"}
-            
-            if len(products) == 1:
-                return {
-                    "optimal_sequence": products,
-                    "total_transition_cost": 0,
-                    "worst_case_cost": 0,
-                    "savings_percent": 0,
-                    "transitions": [],
-                    "recommendations": [],
-                    "estimated_total_energy": None
-                }
-            
-            # Find optimal sequence
-            if len(products) <= 8:
-                best_seq, best_cost = self._exhaustive_search(products)
-            else:
-                best_seq, best_cost = self._greedy_search(products)
-            
-            # Calculate worst case
-            worst_seq = list(reversed(best_seq))
-            worst_cost = self._calculate_cost(worst_seq)
-            
-            savings = ((worst_cost - best_cost) / worst_cost * 100) if worst_cost > 0 else 0
-            
-            # Transitions
-            transitions = []
-            for i in range(len(best_seq) - 1):
-                transitions.append({
-                    "from": best_seq[i],
-                    "to": best_seq[i+1],
-                    "cost_kwh": self.transitions[best_seq[i]][best_seq[i+1]],
-                    "thickness_change": self.profiles[best_seq[i+1]]['thickness_mm'] - self.profiles[best_seq[i]]['thickness_mm'],
-                    "type_change": self.profiles[best_seq[i]]['type'] != self.profiles[best_seq[i+1]]['type'],
-                    "energy_change": self.profiles[best_seq[i+1]]['avg_kwh_per_m3'] - self.profiles[best_seq[i]]['avg_kwh_per_m3']
-                })
-            
-            # Recommendations
-            recommendations = []
-            for trans in transitions:
-                if trans['cost_kwh'] > 100:
-                    recommendations.append(f"⚠️ High cost transition: {trans['from']} → {trans['to']}")
-                if trans['type_change']:
-                    recommendations.append(f"🔧 Material change: {trans['from']} → {trans['to']} - schedule cleaning")
-            
+        if len(products) == 1:
             return {
-                "optimal_sequence": best_seq,
-                "total_transition_cost": round(best_cost, 2),
-                "worst_case_cost": round(worst_cost, 2),
-                "savings_percent": round(savings, 1),
-                "transitions": transitions,
-                "recommendations": recommendations,
+                "optimal_sequence": products,
+                "total_transition_cost": 0,
+                "worst_case_cost": 0,
+                "savings_percent": 0,
+                "transitions": [],
+                "recommendations": ["Single product - no optimization needed"],
                 "estimated_total_energy": None
             }
         
-        def _exhaustive_search(self, products):
-            """Try all permutations"""
-            best_seq = None
-            best_cost = float('inf')
-            
-            for perm in permutations(products):
-                cost = self._calculate_cost(perm)
-                if cost < best_cost:
-                    best_cost = cost
-                    best_seq = list(perm)
-            
-            return best_seq, best_cost
+        # Find optimal sequence
+        if len(products) <= 8:
+            best_seq, best_cost = self._exhaustive_search(products)
+        else:
+            best_seq, best_cost = self._greedy_search(products)
         
-        def _greedy_search(self, products):
-            """Greedy nearest neighbor"""
-            remaining = set(products)
-            current = min(remaining, key=lambda p: self.profiles[p]['thickness_mm'])
-            sequence = [current]
-            remaining.remove(current)
-            
-            while remaining:
-                next_prod = min(remaining, key=lambda p: self.transitions[current][p])
-                sequence.append(next_prod)
-                remaining.remove(next_prod)
-                current = next_prod
-            
-            return sequence, self._calculate_cost(sequence)
+        # Calculate worst case
+        worst_seq = list(reversed(best_seq))
+        worst_cost = self._calculate_cost(worst_seq)
         
-        def _calculate_cost(self, sequence):
-            """Calculate total transition cost"""
-            if len(sequence) < 2:
-                return 0
-            return sum(self.transitions[sequence[i]][sequence[i+1]] for i in range(len(sequence)-1))
+        savings = ((worst_cost - best_cost) / worst_cost * 100) if worst_cost > 0 else 0
         
-        def get_product_info(self, product):
-            """Get product profile"""
-            return self.profiles.get(product, {})
+        # Build transition details
+        transitions = []
+        for i in range(len(best_seq) - 1):
+            from_prod = best_seq[i]
+            to_prod = best_seq[i+1]
+            
+            transitions.append({
+                "from": from_prod,
+                "to": to_prod,
+                "cost_kwh": self.transitions[from_prod][to_prod],
+                "thickness_change": self.profiles[to_prod]['thickness_mm'] - self.profiles[from_prod]['thickness_mm'],
+                "type_change": self.profiles[from_prod]['type'] != self.profiles[to_prod]['type'],
+                "energy_change": self.profiles[to_prod]['avg_kwh_per_m3'] - self.profiles[from_prod]['avg_kwh_per_m3']
+            })
+        
+        # Generate recommendations
+        recommendations = self._generate_recommendations(transitions, wagons_per_product)
+        
+        # Estimate energy
+        estimated_energy = None
+        if wagons_per_product:
+            production_energy = sum(
+                self.profiles[p]['kwh_per_wagon'] * wagons_per_product.get(p, 0)
+                for p in best_seq
+            )
+            estimated_energy = {
+                "production_kwh": round(production_energy, 2),
+                "transition_kwh": round(best_cost, 2),
+                "total_kwh": round(production_energy + best_cost, 2)
+            }
+        
+        return {
+            "optimal_sequence": best_seq,
+            "total_transition_cost": round(best_cost, 2),
+            "worst_case_cost": round(worst_cost, 2),
+            "savings_percent": round(savings, 1),
+            "transitions": transitions,
+            "recommendations": recommendations,
+            "estimated_total_energy": estimated_energy
+        }
+    
+    def _exhaustive_search(self, products):
+        """Try all permutations for small sets"""
+        best_seq = None
+        best_cost = float('inf')
+        
+        for perm in permutations(products):
+            cost = self._calculate_cost(perm)
+            if cost < best_cost:
+                best_cost = cost
+                best_seq = list(perm)
+        
+        return best_seq, best_cost
+    
+    def _greedy_search(self, products):
+        """Greedy nearest neighbor for larger sets"""
+        remaining = set(products)
+        
+        # Start with thinnest product
+        current = min(remaining, key=lambda p: self.profiles[p]['thickness_mm'])
+        sequence = [current]
+        remaining.remove(current)
+        
+        # Build sequence greedily
+        while remaining:
+            next_prod = min(remaining, key=lambda p: self.transitions[current][p])
+            sequence.append(next_prod)
+            remaining.remove(next_prod)
+            current = next_prod
+        
+        return sequence, self._calculate_cost(sequence)
+    
+    def _calculate_cost(self, sequence):
+        """Calculate total transition cost"""
+        if len(sequence) < 2:
+            return 0
+        return sum(
+            self.transitions[sequence[i]][sequence[i+1]]
+            for i in range(len(sequence)-1)
+        )
+    
+    def _generate_recommendations(self, transitions, wagons_per_product):
+        """Generate recommendations"""
+        recs = []
+        
+        for trans in transitions:
+            if trans['cost_kwh'] > 100:
+                recs.append(
+                    f"⚠️ High transition cost: {trans['from']} → {trans['to']} "
+                    f"({trans['cost_kwh']:.1f} kWh). Allow extra setup time."
+                )
+            
+            if trans['type_change']:
+                recs.append(
+                    f"🔧 Material change: {trans['from']} → {trans['to']}. "
+                    f"Schedule cleaning and quality check."
+                )
+            
+            if abs(trans['thickness_change']) > 8:
+                recs.append(
+                    f"📏 Large thickness change: {trans['from']} → {trans['to']} "
+                    f"({trans['thickness_change']:+d}mm). Monitor dryer settings."
+                )
+        
+        if wagons_per_product:
+            total = sum(wagons_per_product.values())
+            if total > 100:
+                recs.append(
+                    f"📊 High volume week ({total} wagons). "
+                    f"Consider night shifts or split batches."
+                )
+        
+        return recs if recs else ["✅ Optimal sequence with smooth transitions!"]
+    
+    def get_product_info(self, product):
+        """Get product profile"""
+        return self.profiles.get(product, {})
 
 # ------------------ Load Database ------------------
 @st.cache_resource
-def load_optimizer():
+def load_database():
     """Load the optimization database"""
-    try:
-        # Try multiple database paths
-        possible_paths = [
-            "optimization_database.json",
-            os.path.join(parent_dir, "optimization_database.json"),
-            "/mount/src/dryer-kpi-dashboard/optimization_database.json",
-        ]
-        
-        for path in possible_paths:
-            if os.path.exists(path):
-                opt = SimpleProductionOptimizer(path)
+    
+    # Try multiple paths
+    possible_paths = [
+        "optimization_database.json",
+        "../optimization_database.json",
+        "/mount/src/dryer-kpi-dashboard/optimization_database.json",
+    ]
+    
+    for path in possible_paths:
+        if os.path.exists(path):
+            try:
+                with open(path, 'r') as f:
+                    db = json.load(f)
                 print(f"✅ Loaded database from: {path}")
-                return opt, True
-        
-        return None, False
-        
-    except Exception as e:
-        print(f"❌ Error loading optimizer: {str(e)}")
-        return None, False
+                return db, True
+            except Exception as e:
+                print(f"Error loading from {path}: {e}")
+                continue
+    
+    return None, False
 
-optimizer, db_loaded = load_optimizer()
+database, db_loaded = load_database()
+
 # ------------------ Header ------------------
-st.markdown('<div class="main-title">🔄 Lindner Dryer - Production Optimizer</div>', 
+st.markdown('<div class="main-title">🔄 Lindner – Dryer Production Optimizer</div>', 
             unsafe_allow_html=True)
 
-import os
-
-# Get the correct path
-current_dir = os.path.dirname(os.path.abspath(__file__))
-parent_dir = os.path.dirname(current_dir)
-db_path = os.path.join(parent_dir, "optimization_database.json")
-
-# Debug: Show where we're looking
-st.sidebar.write(f"Looking for database at: {db_path}")
-st.sidebar.write(f"File exists: {os.path.exists(db_path)}")
-
-# If file doesn't exist, list what's in parent dir
-if not os.path.exists(db_path):
-    st.sidebar.write("Files in parent directory:")
-    try:
-        files = os.listdir(parent_dir)
-        st.sidebar.write(files)
-    except:
-        pass
-
-# Load optimizer
-try:
-    from core.simple_optimizer import SimpleProductionOptimizer
-    opt = SimpleProductionOptimizer(db_path)
-    db_loaded = True
-except Exception as e:
-    st.error(f"Cannot load optimizer: {str(e)}")
-    db_loaded = False
+if not db_loaded:
+    st.error("""
+    ❌ **Optimization Database Not Found!**
+    
+    The file `optimization_database.json` must be in the repository root.
+    
+    **Current location checked:**
+    - Root directory: `optimization_database.json`
+    - Parent directory: `../optimization_database.json`
+    - Absolute path: `/mount/src/dryer-kpi-dashboard/optimization_database.json`
+    
+    **Please ensure:**
+    1. File exists at: https://github.com/Varunism/dryer-kpi-dashboard/optimization_database.json
+    2. File is committed to the `main` branch
+    3. File is in the ROOT directory (not in a subfolder)
+    """)
+    st.stop()
 
 st.success("✅ Optimization database loaded successfully")
+
+# Initialize optimizer
+optimizer = ProductionOptimizer(database)
 
 # ------------------ Sidebar ------------------
 with st.sidebar:
     st.image("https://www.karrieretag.org/wp-content/uploads/2023/10/lindner-logo-1.png", 
-             use_column_width=True)
+             use_container_width=True)
     st.markdown("---")
     
     st.subheader("📦 Weekly Production Plan")
+    st.write("Enter wagons needed per product:")
     
-    st.write("Enter the number of wagons for each product:")
-    
-    all_products = ["L28", "L30", "L32", "L34", "L36", "L38", "L40", "L44", "N40", "N44", "U36"]
+    all_products = list(database['product_profiles'].keys())
     
     weekly_demand = {}
     
-    for product in all_products:
+    for product in sorted(all_products):
         wagons = st.number_input(
             f"{product}:",
             min_value=0,
@@ -250,7 +293,7 @@ with st.sidebar:
         st.metric("Products", len(weekly_demand))
     
     st.markdown("---")
-    optimize_button = st.button("🚀 Optimize Production Order", use_container_width=True)
+    optimize_button = st.button("🚀 Optimize Production Order", use_container_width=True, type="primary")
 
 # ------------------ Main Content ------------------
 if optimize_button:
@@ -258,10 +301,8 @@ if optimize_button:
         st.warning("⚠️ Please enter production quantities for at least one product")
     else:
         with st.spinner("🔄 Calculating optimal sequence..."):
-            # Get products to optimize
-            products_to_optimize = list(weekly_demand.keys())
             
-            # Run optimization
+            products_to_optimize = list(weekly_demand.keys())
             result = optimizer.optimize(products_to_optimize, weekly_demand)
             
             if 'error' in result:
@@ -291,7 +332,7 @@ if optimize_button:
                     st.metric(
                         "Savings",
                         f"{result['savings_percent']:.1f}%",
-                        delta=f"vs worst case",
+                        delta="vs worst case",
                         help="Energy saved vs random sequence"
                     )
                 
@@ -350,11 +391,8 @@ if optimize_button:
                 # Recommendations
                 st.markdown("### 💡 Production Recommendations")
                 
-                if result['recommendations']:
-                    for rec in result['recommendations']:
-                        st.info(rec)
-                else:
-                    st.success("✅ Optimal sequence with smooth transitions!")
+                for rec in result['recommendations']:
+                    st.info(rec)
                 
                 # Product details
                 with st.expander("📊 Product Energy Profiles"):
@@ -383,17 +421,12 @@ if optimize_button:
                     # Excel export
                     excel_file = "Production_Plan.xlsx"
                     with pd.ExcelWriter(excel_file, engine='xlsxwriter') as writer:
-                        # Sequence
                         seq_df = pd.DataFrame({
                             'Position': range(1, len(result['optimal_sequence']) + 1),
                             'Product': result['optimal_sequence']
                         })
                         seq_df.to_excel(writer, sheet_name='Sequence', index=False)
-                        
-                        # Transitions
                         transitions_df.to_excel(writer, sheet_name='Transitions', index=False)
-                        
-                        # Product details
                         details_df.to_excel(writer, sheet_name='Product_Details', index=False)
                     
                     with open(excel_file, 'rb') as f:
@@ -404,6 +437,8 @@ if optimize_button:
                             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                             use_container_width=True
                         )
+                    
+                    os.unlink(excel_file)
                 
                 with col2:
                     # Text report
@@ -426,9 +461,6 @@ WEEKLY DEMAND:
 
 RECOMMENDATIONS:
 {chr(10).join([f'  • {rec}' for rec in result['recommendations']])}
-
-TRANSITION DETAILS:
-{chr(10).join([f'  {t["from"]} → {t["to"]}: {t["cost_kwh"]:.1f} kWh' for t in result['transitions']])}
                     """
                     
                     st.download_button(
@@ -439,7 +471,7 @@ TRANSITION DETAILS:
                         use_container_width=True
                     )
                 
-                st.success("✅ Optimization complete! Use the sequence above for your production schedule.")
+                st.success("✅ Optimization complete!")
 
 else:
     # Instructions
@@ -454,85 +486,28 @@ else:
     
     ### 📊 Step 3: Review Results
     You'll get:
-    - **Optimal production sequence** to minimize energy consumption
+    - **Optimal production sequence** to minimize energy
     - **Transition cost analysis** for each changeover
     - **Energy savings** compared to random ordering
-    - **Specific recommendations** for your production team
-    - **Downloadable reports** (Excel and text formats)
+    - **Specific recommendations** for your team
+    - **Downloadable reports** (Excel and text)
     
     ---
     
     ## 💡 Why This Sequence is Optimal
     
     The optimizer considers:
-    - ✅ Actual energy consumption from your historical data
     - ✅ Product thickness differences (setup time)
-    - ✅ Material type changes (cleaning requirements)
-    - ✅ Temperature adjustment costs between products
-    
-    ### 🎓 Optimization Principles:
-    
-    1. **Group similar products** - Keeps same material types together
-    2. **Gradual thickness changes** - Minimizes dryer adjustments
-    3. **Energy-aware sequencing** - Considers actual kWh/m³ from data
-    4. **Minimize type changes** - Reduces cleaning and quality risks
+    - ✅ Material type changes (cleaning requirements)  
+    - ✅ Energy consumption patterns
+    - ✅ Temperature adjustment costs
     
     ---
     
-    ## 📈 Example
-    
-    **Weekly Demand:**
-    - L36: 20 wagons
-    - L38: 15 wagons
-    - L30: 10 wagons
-    - N40: 12 wagons
-    
-    **Optimal Sequence:**  
-    `L30 → L36 → L38 → N40`
-    
-    **Why?**
-    - Starts with thinnest L-type (L30)
-    - Gradually increases thickness (L30→L36→L38)
-    - Only one material type change (L→N) at the end
-    - Saves ~25% energy vs random order
-    
-    ---
-    
-    **Need to update the database?**  
-    Run `build_optimization_database.py` again with your latest data.
+    **Database Info:**
+    - Products: {len(database['product_profiles'])}
+    - Database created: {database['metadata'].get('created', 'Unknown')}
     """)
-    
-    # Show database info
-    if optimizer:
-        st.markdown("---")
-        st.markdown("### 📊 Database Information")
-        
-        with open("optimization_database.json", 'r') as f:
-            db = json.load(f)
-        
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            st.metric("Products in Database", len(db['product_profiles']))
-        
-        with col2:
-            created = datetime.fromisoformat(db['metadata']['created'])
-            days_old = (datetime.now() - created).days
-            st.metric("Database Age", f"{days_old} days")
-        
-        with col3:
-            st.metric("Total Transitions", len(db['product_profiles'])**2)
-        
-        # Show available products
-        with st.expander("View Available Products"):
-            products_info = []
-            for prod, profile in db['product_profiles'].items():
-                products_info.append({
-                    'Product': prod,
-                    'Type': profile['type'],
-                    'Thickness': f"{profile['thickness_mm']}mm",
-                    'kWh/m³': f"{profile['avg_kwh_per_m3']:.2f}",
-                    'Data Points': profile['total_wagons_produced']
-                })
-            
-            st.dataframe(pd.DataFrame(products_info), use_container_width=True)
+
+st.markdown("---")
+st.caption("🏭 Lindner Dryer - Production Optimizer v2.0 (Standalone)")
