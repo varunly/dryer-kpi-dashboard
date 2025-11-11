@@ -3,10 +3,6 @@ Lindner Dryer - KPI Analysis Dashboard
 Analyzes energy efficiency and creates reports
 """
 # Add at the very top after imports
-import logging
-logging.basicConfig(level=logging.DEBUG)
-logger = logging.getLogger(__name__)
-
 import streamlit as st
 import pandas as pd
 import tempfile
@@ -15,6 +11,72 @@ import plotly.graph_objects as go
 from datetime import datetime
 import os
 import sys
+import numpy as np
+from itertools import permutations
+
+# Fix import path for Streamlit Cloud
+current_file = os.path.abspath(__file__)
+current_dir = os.path.dirname(current_file)
+parent_dir = os.path.dirname(current_dir)
+
+# Add paths
+sys.path.insert(0, parent_dir)
+sys.path.insert(0, os.path.join(parent_dir, 'core'))
+
+# Show debug info
+print(f"Current file: {current_file}")
+print(f"Current dir: {current_dir}")
+print(f"Parent dir: {parent_dir}")
+print(f"Python path: {sys.path}")
+
+# Try importing
+try:
+    # Method 1: Direct import from core
+    import core.dryer_kpi_monthly_final as kpi_module
+    parse_energy = kpi_module.parse_energy
+    parse_wagon = kpi_module.parse_wagon
+    explode_intervals = kpi_module.explode_intervals
+    allocate_energy = kpi_module.allocate_energy
+    CONFIG = kpi_module.CONFIG
+    print("✅ Import successful: Method 1 (core.module)")
+    
+except ImportError as e1:
+    print(f"Method 1 failed: {e1}")
+    try:
+        # Method 2: Add to path and import
+        from dryer_kpi_monthly_final import (
+            parse_energy, parse_wagon, explode_intervals, 
+            allocate_energy, CONFIG
+        )
+        print("✅ Import successful: Method 2 (direct)")
+        
+    except ImportError as e2:
+        print(f"Method 2 failed: {e2}")
+        
+        # Show detailed error
+        st.error(f"""
+        ❌ Cannot import required modules
+        
+        **Debug Info:**
+        - Current file: `{current_file}`
+        - Parent dir: `{parent_dir}`
+        - Error 1: {e1}
+        - Error 2: {e2}
+        
+        **Files in parent directory:**
+        """)
+        
+        try:
+            files = os.listdir(parent_dir)
+            st.write(files)
+            
+            if 'core' in files:
+                core_files = os.listdir(os.path.join(parent_dir, 'core'))
+                st.write("Files in core/:", core_files)
+        except:
+            pass
+        
+        st.stop()
 
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -468,4 +530,5 @@ with st.sidebar:
         st.write("**File Upload Status:**")
         st.write(f"Energy file: {'✅' if energy_file else '❌'}")
         st.write(f"Wagon file: {'✅' if wagon_file else '❌'}")
+
 
