@@ -67,19 +67,34 @@ optimizer, db_loaded = load_optimizer()
 st.markdown('<div class="main-title">🔄 Lindner Dryer - Production Optimizer</div>', 
             unsafe_allow_html=True)
 
-if not db_loaded:
-    st.error("""
-    ❌ **Optimization Database Not Found!**
-    
-    Please run `build_optimization_database.py` first to create the database.
-    
-    ```bash
-    python build_optimization_database.py
-    ```
-    
-    This will analyze your historical data and create the optimization database.
-    """)
-    st.stop()
+import os
+
+# Get the correct path
+current_dir = os.path.dirname(os.path.abspath(__file__))
+parent_dir = os.path.dirname(current_dir)
+db_path = os.path.join(parent_dir, "optimization_database.json")
+
+# Debug: Show where we're looking
+st.sidebar.write(f"Looking for database at: {db_path}")
+st.sidebar.write(f"File exists: {os.path.exists(db_path)}")
+
+# If file doesn't exist, list what's in parent dir
+if not os.path.exists(db_path):
+    st.sidebar.write("Files in parent directory:")
+    try:
+        files = os.listdir(parent_dir)
+        st.sidebar.write(files)
+    except:
+        pass
+
+# Load optimizer
+try:
+    from core.simple_optimizer import SimpleProductionOptimizer
+    opt = SimpleProductionOptimizer(db_path)
+    db_loaded = True
+except Exception as e:
+    st.error(f"Cannot load optimizer: {str(e)}")
+    db_loaded = False
 
 st.success("✅ Optimization database loaded successfully")
 
