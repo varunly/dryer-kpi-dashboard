@@ -2,6 +2,10 @@
 Lindner Dryer - KPI Analysis Dashboard
 Analyzes energy efficiency and creates reports
 """
+# Add at the very top after imports
+import logging
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
 
 import streamlit as st
 import pandas as pd
@@ -464,3 +468,4 @@ with st.sidebar:
         st.write("**File Upload Status:**")
         st.write(f"Energy file: {'✅' if energy_file else '❌'}")
         st.write(f"Wagon file: {'✅' if wagon_file else '❌'}")
+
