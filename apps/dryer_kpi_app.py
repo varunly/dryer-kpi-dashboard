@@ -1,583 +1,372 @@
-"""
-Lindner Dryer - Production Order Optimizer
-WITH DYNAMIC ENERGY CALCULATION FROM UPLOADED DATA
-"""
-
 import streamlit as st
 import pandas as pd
+import tempfile
 import plotly.express as px
 import plotly.graph_objects as go
-from datetime import datetime
-import json
-import os
-import numpy as np
-from itertools import permutations
+from pathlib import Path
+import sys
+
+# Import the KPI calculation module
+try:
+    from dryer_kpi_monthly_final import (
+        parse_energy, parse_wagon, explode_intervals, 
+        allocate_energy, CONFIG
+    )
+except ImportError:
+    st.error("❌ Unable to import dryer_kpi_monthly_final module")
+    st.stop()
 
 # ------------------ Page Configuration ------------------
 st.set_page_config(
-    page_title="Lindner Dryer - Production Optimizer",
-    page_icon="🔄",
-    layout="wide"
+    page_title="Lindner Dryer KPI Dashboard",
+    page_icon="🏭",
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
 # ------------------ Custom CSS ------------------
 st.markdown("""
-<style>
-.main-title {
-    font-size: 36px;
-    color: #003366;
-    font-weight: 700;
-    text-align: center;
-    margin-bottom: 20px;
-}
-
-.sequence-box {
-    background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
-    padding: 30px;
-    border-radius: 15px;
-    color: white;
-    text-align: center;
-    font-size: 24px;
-    font-weight: 600;
-    margin: 20px 0;
-}
-
-.metric-card {
-    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-    padding: 20px;
-    border-radius: 15px;
-    text-align: center;
-    color: white;
-}
-</style>
+    <style>
+    .main-title {
+        font-size: 36px;
+        color: #003366;
+        font-weight: 700;
+        text-align: center;
+        margin-bottom: 20px;
+        text-shadow: 1px 1px 2px rgba(0,0,0,0.1);
+    }
+    
+    .section-header {
+        color: #003366;
+        font-size: 22px;
+        font-weight: 600;
+        margin-top: 40px;
+        margin-bottom: 20px;
+        border-bottom: 2px solid #003366;
+        padding-bottom: 6px;
+    }
+    
+    .metric-card {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        padding: 20px;
+        border-radius: 15px;
+        text-align: center;
+        box-shadow: 0 4px 15px rgba(0,0,0,0.2);
+        color: white;
+    }
+    
+    .metric-card h3 {
+        margin: 0;
+        font-size: 16px;
+        opacity: 0.9;
+    }
+    
+    .metric-card h2 {
+        margin: 10px 0 0 0;
+        font-size: 32px;
+        font-weight: 700;
+    }
+    
+    .stDownloadButton button {
+        background-color: #003366;
+        color: white;
+        border-radius: 8px;
+        padding: 10px 20px;
+        font-weight: 600;
+    }
+    </style>
 """, unsafe_allow_html=True)
 
-# ------------------ DATA PROCESSOR CLASS ------------------
-class ProductionDataProcessor:
-    """Process uploaded production data to calculate energy metrics"""
-    
-    def __init__(self):
-        self.df = None
-        self.product_profiles = {}
-        self.transition_matrix = {}
-    
-    def load_data(self, uploaded_file):
-        """Load and validate uploaded data"""
-        try:
-            if uploaded_file.name.endswith('.csv'):
-                self.df = pd.read_csv(uploaded_file)
-            elif uploaded_file.name.endswith(('.xls', '.xlsx')):
-                self.df = pd.read_excel(uploaded_file)
-            else:
-                return False, "Unsupported file format. Please upload CSV or Excel."
-            
-            # Validate required columns
-            required_cols = ['product', 'energy_kwh', 'volume_m3']
-            missing_cols = [col for col in required_cols if col not in self.df.columns]
-            
-            if missing_cols:
-                return False, f"Missing required columns: {', '.join(missing_cols)}"
-            
-            return True, "Data loaded successfully"
-        
-        except Exception as e:
-            return False, f"Error loading file: {str(e)}"
-    
-    def calculate_energy_metrics(self):
-        """Calculate energy consumption per product from uploaded data"""
-        
-        if self.df is None:
-            return False, "No data loaded"
-        
-        # Group by product and calculate metrics
-        product_stats = self.df.groupby('product').agg({
-            'energy_kwh': ['sum', 'mean', 'std', 'count'],
-            'volume_m3': ['sum', 'mean'],
-        }).reset_index()
-        
-        product_stats.columns = ['_'.join(col).strip('_') for col in product_stats.columns]
-        
-        # Calculate energy efficiency (kWh per m³)
-        for _, row in product_stats.iterrows():
-            product = row['product']
-            
-            total_energy = row['energy_kwh_sum']
-            total_volume = row['volume_m3_sum']
-            avg_energy = row['energy_kwh_mean']
-            batches = row['energy_kwh_count']
-            
-            # Energy per cubic meter
-            kwh_per_m3 = total_energy / total_volume if total_volume > 0 else 0
-            
-            # Estimate wagon energy (assuming ~9 m³ per wagon - adjust as needed)
-            wagon_volume = 9.0  # m³
-            kwh_per_wagon = kwh_per_m3 * wagon_volume
-            
-            # Get additional info if available
-            thickness = self.df[self.df['product'] == product]['thickness_mm'].iloc[0] \
-                       if 'thickness_mm' in self.df.columns else self._estimate_thickness(product)
-            
-            product_type = self.df[self.df['product'] == product]['type'].iloc[0] \
-                          if 'type' in self.df.columns else self._classify_product_type(product)
-            
-            self.product_profiles[product] = {
-                'type': product_type,
-                'thickness_mm': thickness,
-                'avg_kwh_per_m3': round(kwh_per_m3, 2),
-                'kwh_per_wagon': round(kwh_per_wagon, 1),
-                'total_batches': int(batches),
-                'total_energy': round(total_energy, 2),
-                'total_volume': round(total_volume, 2),
-                'std_dev': round(row['energy_kwh_std'], 2)
-            }
-        
-        return True, f"Calculated metrics for {len(self.product_profiles)} products"
-    
-    def calculate_transition_matrix(self):
-        """Calculate transition costs between products"""
-        
-        products = list(self.product_profiles.keys())
-        
-        # Initialize matrix
-        for p1 in products:
-            self.transition_matrix[p1] = {}
-            for p2 in products:
-                if p1 == p2:
-                    self.transition_matrix[p1][p2] = 0
-                else:
-                    # Calculate transition cost based on:
-                    # 1. Thickness difference
-                    # 2. Type change
-                    # 3. Energy level difference
-                    
-                    prof1 = self.product_profiles[p1]
-                    prof2 = self.product_profiles[p2]
-                    
-                    thickness_cost = abs(prof2['thickness_mm'] - prof1['thickness_mm']) * 10
-                    type_cost = 150 if prof1['type'] != prof2['type'] else 0
-                    energy_cost = abs(prof2['avg_kwh_per_m3'] - prof1['avg_kwh_per_m3']) * 0.5
-                    
-                    total_cost = thickness_cost + type_cost + energy_cost
-                    self.transition_matrix[p1][p2] = round(total_cost, 2)
-        
-        return True, "Transition matrix calculated"
-    
-    def _estimate_thickness(self, product_name):
-        """Estimate thickness from product name (e.g., WS08 -> 8mm)"""
-        import re
-        match = re.search(r'(\d+)', product_name)
-        return int(match.group(1)) if match else 10
-    
-    def _classify_product_type(self, product_name):
-        """Classify product type from name"""
-        name_upper = product_name.upper()
-        if 'WS' in name_upper or 'WOOD' in name_upper:
-            return 'Wood Shavings'
-        elif 'HS' in name_upper or 'HEMP' in name_upper:
-            return 'Hemp Shavings'
-        elif 'SS' in name_upper or 'STRAW' in name_upper:
-            return 'Straw'
-        else:
-            return 'Unknown'
-    
-    def get_database(self):
-        """Return database dict for optimizer"""
-        return {
-            'product_profiles': self.product_profiles,
-            'transition_matrix': self.transition_matrix,
-            'metadata': {
-                'created': datetime.now().isoformat(),
-                'source': 'uploaded_data',
-                'products_count': len(self.product_profiles)
-            }
-        }
-
-# ------------------ OPTIMIZER CLASS ------------------
-class ProductionOptimizer:
-    def __init__(self, database):
-        """Initialize with database dict"""
-        self.db = database
-        self.profiles = database['product_profiles']
-        self.transitions = database['transition_matrix']
-        self.rules = database.get('optimization_rules', {})
-    
-    def optimize(self, products, wagons_per_product=None):
-        """Find optimal production sequence"""
-        if not products or len(products) < 1:
-            return {"error": "No products specified"}
-        
-        if len(products) == 1:
-            return {
-                "optimal_sequence": products,
-                "total_transition_cost": 0,
-                "worst_case_cost": 0,
-                "savings_percent": 0,
-                "transitions": [],
-                "recommendations": ["Single product - no optimization needed"],
-                "estimated_total_energy": None
-            }
-        
-        # Find optimal sequence
-        if len(products) <= 8:
-            best_seq, best_cost = self._exhaustive_search(products)
-        else:
-            best_seq, best_cost = self._greedy_search(products)
-        
-        # Calculate worst case
-        worst_seq = list(reversed(best_seq))
-        worst_cost = self._calculate_cost(worst_seq)
-        
-        savings = ((worst_cost - best_cost) / worst_cost * 100) if worst_cost > 0 else 0
-        
-        # Build transition details
-        transitions = []
-        for i in range(len(best_seq) - 1):
-            from_prod = best_seq[i]
-            to_prod = best_seq[i+1]
-            
-            transitions.append({
-                "from": from_prod,
-                "to": to_prod,
-                "cost_kwh": self.transitions[from_prod][to_prod],
-                "thickness_change": self.profiles[to_prod]['thickness_mm'] - self.profiles[from_prod]['thickness_mm'],
-                "type_change": self.profiles[from_prod]['type'] != self.profiles[to_prod]['type'],
-                "energy_change": self.profiles[to_prod]['avg_kwh_per_m3'] - self.profiles[from_prod]['avg_kwh_per_m3']
-            })
-        
-        # Generate recommendations
-        recommendations = self._generate_recommendations(transitions, wagons_per_product)
-        
-        # Estimate energy
-        estimated_energy = None
-        if wagons_per_product:
-            production_energy = sum(
-                self.profiles[p]['kwh_per_wagon'] * wagons_per_product.get(p, 0)
-                for p in best_seq
-            )
-            estimated_energy = {
-                "production_kwh": round(production_energy, 2),
-                "transition_kwh": round(best_cost, 2),
-                "total_kwh": round(production_energy + best_cost, 2)
-            }
-        
-        return {
-            "optimal_sequence": best_seq,
-            "total_transition_cost": round(best_cost, 2),
-            "worst_case_cost": round(worst_cost, 2),
-            "savings_percent": round(savings, 1),
-            "transitions": transitions,
-            "recommendations": recommendations,
-            "estimated_total_energy": estimated_energy
-        }
-    
-    def _exhaustive_search(self, products):
-        """Try all permutations for small sets"""
-        best_seq = None
-        best_cost = float('inf')
-        
-        for perm in permutations(products):
-            cost = self._calculate_cost(perm)
-            if cost < best_cost:
-                best_cost = cost
-                best_seq = list(perm)
-        
-        return best_seq, best_cost
-    
-    def _greedy_search(self, products):
-        """Greedy nearest neighbor for larger sets"""
-        remaining = set(products)
-        
-        # Start with thinnest product
-        current = min(remaining, key=lambda p: self.profiles[p]['thickness_mm'])
-        sequence = [current]
-        remaining.remove(current)
-        
-        # Build sequence greedily
-        while remaining:
-            next_prod = min(remaining, key=lambda p: self.transitions[current][p])
-            sequence.append(next_prod)
-            remaining.remove(next_prod)
-            current = next_prod
-        
-        return sequence, self._calculate_cost(sequence)
-    
-    def _calculate_cost(self, sequence):
-        """Calculate total transition cost"""
-        if len(sequence) < 2:
-            return 0
-        return sum(
-            self.transitions[sequence[i]][sequence[i+1]]
-            for i in range(len(sequence)-1)
-        )
-    
-    def _generate_recommendations(self, transitions, wagons_per_product):
-        """Generate recommendations"""
-        recs = []
-        
-        for trans in transitions:
-            if trans['cost_kwh'] > 100:
-                recs.append(
-                    f"⚠️ High transition cost: {trans['from']} → {trans['to']} "
-                    f"({trans['cost_kwh']:.1f} kWh). Allow extra setup time."
-                )
-            
-            if trans['type_change']:
-                recs.append(
-                    f"🔧 Material change: {trans['from']} → {trans['to']}. "
-                    f"Schedule cleaning and quality check."
-                )
-            
-            if abs(trans['thickness_change']) > 8:
-                recs.append(
-                    f"📏 Large thickness change: {trans['from']} → {trans['to']} "
-                    f"({trans['thickness_change']:+d}mm). Monitor dryer settings."
-                )
-        
-        if wagons_per_product:
-            total = sum(wagons_per_product.values())
-            if total > 100:
-                recs.append(
-                    f"📊 High volume week ({total} wagons). "
-                    f"Consider night shifts or split batches."
-                )
-        
-        return recs if recs else ["✅ Optimal sequence with smooth transitions!"]
-    
-    def get_product_info(self, product):
-        """Get product profile"""
-        return self.profiles.get(product, {})
-
 # ------------------ Header ------------------
-st.markdown('<div class="main-title">🔄 Lindner – Dryer Production Optimizer</div>',
+st.markdown('<div class="main-title">🏭 Lindner – Dryer KPI Monitoring Dashboard</div>', 
             unsafe_allow_html=True)
 
-# ------------------ Initialize Session State ------------------
-if 'processor' not in st.session_state:
-    st.session_state.processor = ProductionDataProcessor()
-if 'data_loaded' not in st.session_state:
-    st.session_state.data_loaded = False
-if 'database' not in st.session_state:
-    st.session_state.database = None
+st.info("📊 Upload your Energy and Hordenwagen files to analyze dryer efficiency across zones and products.")
 
-# ------------------ FILE UPLOAD SECTION ------------------
-st.markdown("## 📤 Step 1: Upload Production Data")
-
-st.info("""
-**Required columns in your data file:**
-- `product` - Product code (e.g., WS08, WS10, HS12)
-- `energy_kwh` - Energy consumed per batch/wagon
-- `volume_m3` - Volume produced per batch/wagon
-
-**Optional columns:**
-- `thickness_mm` - Product thickness
-- `type` - Product type (Wood Shavings, Hemp, etc.)
-- `date` - Production date
-""")
-
-uploaded_file = st.file_uploader(
-    "Upload your production data (CSV or Excel)",
-    type=['csv', 'xlsx', 'xls'],
-    help="File should contain columns: product, energy_kwh, volume_m3"
-)
-
-if uploaded_file is not None:
-    with st.spinner("Processing data..."):
-        # Load data
-        success, message = st.session_state.processor.load_data(uploaded_file)
-        
-        if success:
-            st.success(f"✅ {message}")
-            
-            # Show preview
-            st.markdown("### 📊 Data Preview")
-            st.dataframe(st.session_state.processor.df.head(10), use_container_width=True)
-            
-            # Calculate metrics
-            calc_success, calc_message = st.session_state.processor.calculate_energy_metrics()
-            if calc_success:
-                st.success(f"✅ {calc_message}")
-                
-                # Calculate transitions
-                trans_success, trans_message = st.session_state.processor.calculate_transition_matrix()
-                if trans_success:
-                    st.success(f"✅ {trans_message}")
-                    
-                    # Store database
-                    st.session_state.database = st.session_state.processor.get_database()
-                    st.session_state.data_loaded = True
-                    
-                    # Show calculated energy metrics
-                    st.markdown("### ⚡ Calculated Energy Metrics")
-                    
-                    metrics_data = []
-                    for product, profile in st.session_state.database['product_profiles'].items():
-                        metrics_data.append({
-                            'Product': product,
-                            'Type': profile['type'],
-                            'Thickness (mm)': profile['thickness_mm'],
-                            'kWh/m³': profile['avg_kwh_per_m3'],
-                            'kWh/Wagon': profile['kwh_per_wagon'],
-                            'Batches': profile['total_batches'],
-                            'Total Energy': f"{profile['total_energy']:.0f} kWh",
-                            'Std Dev': profile['std_dev']
-                        })
-                    
-                    metrics_df = pd.DataFrame(metrics_data)
-                    st.dataframe(metrics_df, use_container_width=True)
-                else:
-                    st.error(trans_message)
-            else:
-                st.error(calc_message)
-        else:
-            st.error(f"❌ {message}")
-
-# ------------------ OPTIMIZATION SECTION ------------------
-if st.session_state.data_loaded and st.session_state.database:
+# ------------------ Sidebar ------------------
+with st.sidebar:
+    st.image("https://www.karrieretag.org/wp-content/uploads/2023/10/lindner-logo-1.png", 
+             use_column_width=True)
+    st.markdown("---")
+    
+    st.subheader("📁 Data Upload")
+    energy_file = st.file_uploader(
+        "📊 Energy File (.xlsx)", 
+        type=["xlsx"],
+        help="Upload the hourly energy consumption Excel file"
+    )
+    wagon_file = st.file_uploader(
+        "🚛 Hordenwagen File (.xlsm, .xlsx)", 
+        type=["xlsm", "xlsx"],
+        help="Upload the wagon tracking Excel file"
+    )
     
     st.markdown("---")
-    st.markdown("## 🎯 Step 2: Plan Production & Optimize")
+    st.subheader("⚙️ Filters")
     
-    # Initialize optimizer
-    optimizer = ProductionOptimizer(st.session_state.database)
+    products = st.multiselect(
+        "🧱 Product(s):",
+        ["L30", "L32", "L34", "L36", "L38", "L40", "N40", "N44"],
+        default=["L36"],
+        help="Select one or more products to analyze"
+    )
     
-    # Sidebar for production planning
-    with st.sidebar:
-        st.image("https://www.karrieretag.org/wp-content/uploads/2023/10/lindner-logo-1.png",
-                 use_container_width=True)
-        st.markdown("---")
-        
-        st.subheader("📦 Weekly Production Plan")
-        st.write("Enter wagons needed per product:")
-        
-        all_products = list(st.session_state.database['product_profiles'].keys())
-        
-        weekly_demand = {}
-        
-        for product in sorted(all_products):
-            wagons = st.number_input(
-                f"{product}:",
-                min_value=0,
-                max_value=100,
-                value=0,
-                key=f"wagon_{product}"
-            )
-            if wagons > 0:
-                weekly_demand[product] = wagons
-        
-        st.markdown("---")
-        
-        if weekly_demand:
-            total_wagons = sum(weekly_demand.values())
-            st.metric("Total Wagons", total_wagons)
-            st.metric("Products", len(weekly_demand))
-        
-        st.markdown("---")
-        optimize_button = st.button("🚀 Optimize Production Order", use_container_width=True, type="primary")
+    month = st.number_input(
+        "📅 Month (0 = all):",
+        min_value=0,
+        max_value=12,
+        value=0,
+        help="Filter by specific month (1-12) or 0 for all months"
+    )
     
-    # Main optimization results
-    if optimize_button:
-        if not weekly_demand:
-            st.warning("⚠️ Please enter production quantities for at least one product")
-        else:
-            with st.spinner("🔄 Calculating optimal sequence..."):
+    st.markdown("---")
+    run_button = st.button("▶️ Run Analysis", use_container_width=True)
+
+# ------------------ Helper Functions ------------------
+def create_kpi_card(title, value, unit):
+    """Create a styled KPI metric card"""
+    return f'''
+    <div class="metric-card">
+        <h3>{title}</h3>
+        <h2>{value:,.2f} {unit}</h2>
+    </div>
+    '''
+
+def run_analysis(energy_path, wagon_path, products_filter, month_filter):
+    """Run the KPI analysis with progress tracking"""
+    
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    try:
+        # Step 1: Parse energy data
+        status_text.text("🔄 Parsing energy data...")
+        progress_bar.progress(20)
+        e_raw = pd.read_excel(energy_path, sheet_name=CONFIG["energy_sheet"])
+        e = parse_energy(e_raw)
+        
+        # Step 2: Parse wagon data
+        status_text.text("🔄 Parsing wagon tracking data...")
+        progress_bar.progress(40)
+        w_raw = pd.read_excel(
+            wagon_path, 
+            sheet_name=CONFIG["wagon_sheet"], 
+            header=CONFIG["wagon_header_row"]
+        )
+        w = parse_wagon(w_raw)
+        
+        # Step 3: Apply filters
+        status_text.text("🔄 Applying filters...")
+        progress_bar.progress(60)
+        if products_filter:
+            w = w[w["Produkt"].astype(str).isin(products_filter)]
+        if month_filter:
+            e = e[e["Month"] == month_filter]
+            w = w[w["Month"] == month_filter]
+        
+        # Step 4: Process intervals
+        status_text.text("🔄 Processing zone intervals...")
+        progress_bar.progress(70)
+        ivals = explode_intervals(w)
+        
+        # Step 5: Allocate energy
+        status_text.text("🔄 Allocating energy to products...")
+        progress_bar.progress(85)
+        alloc = allocate_energy(e, ivals)
+        
+        # Step 6: Create summaries
+        status_text.text("🔄 Generating summaries...")
+        progress_bar.progress(95)
+        
+        summary = alloc.groupby(["Month", "Produkt", "Zone"], as_index=False).agg(
+            Energy_kWh=("Energy_share_kWh", "sum"),
+            Volume_m3=("m3", "sum")
+        )
+        summary["kWh_per_m3"] = (
+            summary["Energy_kWh"] / summary["Volume_m3"].replace(0, pd.NA)
+        )
+        
+        yearly = summary.groupby(["Produkt", "Zone"], as_index=False).agg(
+            Energy_kWh=("Energy_kWh", "sum"),
+            Volume_m3=("Volume_m3", "sum")
+        )
+        yearly["kWh_per_m3"] = (
+            yearly["Energy_kWh"] / yearly["Volume_m3"].replace(0, pd.NA)
+        )
+        
+        progress_bar.progress(100)
+        status_text.text("✅ Analysis complete!")
+        
+        return {
+            'summary': summary,
+            'yearly': yearly,
+            'energy': e,
+            'wagons': w,
+            'intervals': ivals,
+            'allocation': alloc
+        }
+        
+    except Exception as e:
+        status_text.empty()
+        progress_bar.empty()
+        raise e
+
+# ------------------ Main Processing ------------------
+if run_button:
+    if not energy_file or not wagon_file:
+        st.error("⚠️ Please upload both files before running analysis.")
+    else:
+        try:
+            # Create temporary files
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp_e, \
+                 tempfile.NamedTemporaryFile(delete=False, suffix=".xlsm") as tmp_w:
                 
-                products_to_optimize = list(weekly_demand.keys())
-                result = optimizer.optimize(products_to_optimize, weekly_demand)
+                tmp_e.write(energy_file.read())
+                tmp_w.write(wagon_file.read())
+                tmp_e.flush()
+                tmp_w.flush()
                 
-                if 'error' in result:
-                    st.error(f"❌ {result['error']}")
-                else:
-                    # Display optimal sequence
-                    st.markdown("### 🏆 Optimal Production Sequence")
-                    
-                    sequence_html = f'''
-                    <div class="sequence-box">
-                        {' → '.join(result['optimal_sequence'])}
-                    </div>
-                    '''
-                    st.markdown(sequence_html, unsafe_allow_html=True)
-                    
-                    # Metrics
-                    col1, col2, col3 = st.columns(3)
-                    
-                    with col1:
-                        st.metric(
-                            "Transition Cost",
-                            f"{result['total_transition_cost']:.1f} kWh",
-                            help="Energy cost of all transitions"
-                        )
-                    
-                    with col2:
-                        st.metric(
-                            "Savings",
-                            f"{result['savings_percent']:.1f}%",
-                            delta="vs worst case",
-                            help="Energy saved vs random sequence"
-                        )
-                    
-                    with col3:
-                        if result['estimated_total_energy']:
-                            st.metric(
-                                "Total Energy",
-                                f"{result['estimated_total_energy']['total_kwh']:,.0f} kWh",
-                                help="Production + transition energy"
-                            )
-                    
-                    # Transition details
-                    st.markdown("### 📋 Transition Analysis")
-                    
-                    transitions_data = []
-                    for trans in result['transitions']:
-                        transitions_data.append({
-                            'From': trans['from'],
-                            'To': trans['to'],
-                            'Cost (kWh)': f"{trans['cost_kwh']:.1f}",
-                            'Thickness Δ (mm)': f"{trans['thickness_change']:+d}",
-                            'Type Change': '✓' if trans['type_change'] else '',
-                            'Energy Δ (kWh/m³)': f"{trans['energy_change']:+.1f}"
-                        })
-                    
-                    transitions_df = pd.DataFrame(transitions_data)
-                    st.dataframe(transitions_df, use_container_width=True)
-                    
-                    # Visualization
-                    st.markdown("### 📈 Energy Profile")
-                    
-                    energy_profile = []
-                    for i, product in enumerate(result['optimal_sequence']):
-                        profile = optimizer.get_product_info(product)
-                        energy_profile.append({
-                            'Position': i + 1,
-                            'Product': product,
-                            'Energy (kWh/m³)': profile['avg_kwh_per_m3'],
-                            'Wagons': weekly_demand.get(product, 0)
-                        })
-                    
-                    profile_df = pd.DataFrame(energy_profile)
-                    
-                    fig = px.line(
-                        profile_df,
-                        x='Position',
-                        y='Energy (kWh/m³)',
-                        text='Product',
-                        markers=True,
-                        title="Energy Consumption Through Production Sequence"
+                # Run analysis
+                results = run_analysis(
+                    tmp_e.name,
+                    tmp_w.name,
+                    products if products else None,
+                    month if month != 0 else None
+                )
+                
+                summary = results['summary']
+                yearly = results['yearly']
+                
+                # Check if we have data
+                if summary.empty:
+                    st.warning("⚠️ No data found matching the selected filters.")
+                    st.stop()
+                
+                # --------------- KPI Cards ---------------
+                st.markdown('<div class="section-header">📈 Summary KPIs</div>', 
+                           unsafe_allow_html=True)
+                
+                total_energy = yearly["Energy_kWh"].sum()
+                avg_kpi = yearly["kWh_per_m3"].mean()
+                total_volume = yearly["Volume_m3"].sum()
+                
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.markdown(
+                        create_kpi_card("Total Energy", total_energy, "kWh"),
+                        unsafe_allow_html=True
                     )
-                    fig.update_traces(textposition="top center", line=dict(width=3))
-                    fig.update_layout(height=400, plot_bgcolor='white')
-                    st.plotly_chart(fig, use_container_width=True)
+                with col2:
+                    st.markdown(
+                        create_kpi_card("Avg. Efficiency", avg_kpi, "kWh/m³"),
+                        unsafe_allow_html=True
+                    )
+                with col3:
+                    st.markdown(
+                        create_kpi_card("Total Volume", total_volume, "m³"),
+                        unsafe_allow_html=True
+                    )
+                
+                # --------------- Monthly Trend ---------------
+                st.markdown('<div class="section-header">📊 Monthly KPI Trend</div>', 
+                           unsafe_allow_html=True)
+                
+                fig1 = px.line(
+                    summary,
+                    x="Month",
+                    y="kWh_per_m3",
+                    color="Zone",
+                    markers=True,
+                    hover_data=["Produkt", "Energy_kWh", "Volume_m3"],
+                    title="Energy Efficiency by Month and Zone"
+                )
+                fig1.update_layout(
+                    height=500,
+                    xaxis_title="Month",
+                    yaxis_title="kWh/m³",
+                    plot_bgcolor="white",
+                    hovermode='x unified'
+                )
+                st.plotly_chart(fig1, use_container_width=True)
+                
+                # --------------- Zone Comparison ---------------
+                st.markdown('<div class="section-header">📉 Zone Comparison</div>', 
+                           unsafe_allow_html=True)
+                
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    fig2 = px.bar(
+                        yearly,
+                        x="Zone",
+                        y="kWh_per_m3",
+                        color="Produkt",
+                        text_auto=".2f",
+                        title="Yearly KPI by Zone"
+                    )
+                    fig2.update_layout(height=400, plot_bgcolor="white")
+                    st.plotly_chart(fig2, use_container_width=True)
+                
+                with col2:
+                    fig3 = px.pie(
+                        yearly,
+                        values="Energy_kWh",
+                        names="Zone",
+                        title="Energy Distribution by Zone"
+                    )
+                    fig3.update_layout(height=400)
+                    st.plotly_chart(fig3, use_container_width=True)
+                
+                # --------------- Data Tables ---------------
+                with st.expander("📋 View Detailed Data Tables"):
+                    tab1, tab2 = st.tabs(["Monthly Summary", "Yearly Summary"])
                     
-                    # Recommendations
-                    st.markdown("### 💡 Production Recommendations")
+                    with tab1:
+                        st.dataframe(
+                            summary.style.format({
+                                "Energy_kWh": "{:.2f}",
+                                "Volume_m3": "{:.2f}",
+                                "kWh_per_m3": "{:.2f}"
+                            }),
+                            use_container_width=True
+                        )
                     
-                    for rec in result['recommendations']:
-                        st.info(rec)
-                    
-                    st.success("✅ Optimization complete!")
-
-else:
-    st.markdown("---")
-    st.info("👆 Please upload your production data file to begin")
-
-st.markdown("---")
-st.caption("🏭 Lindner Dryer - Production Optimizer v3.0 (Dynamic Data Processing)")
+                    with tab2:
+                        st.dataframe(
+                            yearly.style.format({
+                                "Energy_kWh": "{:.2f}",
+                                "Volume_m3": "{:.2f}",
+                                "kWh_per_m3": "{:.2f}"
+                            }),
+                            use_container_width=True
+                        )
+                
+                # --------------- Download Section ---------------
+                st.markdown('<div class="section-header">📥 Export Results</div>', 
+                           unsafe_allow_html=True)
+                
+                # Create Excel file in memory
+                output_path = "Dryer_KPI_Results.xlsx"
+                with pd.ExcelWriter(output_path, engine="xlsxwriter") as writer:
+                    results['energy'].to_excel(writer, sheet_name="Energy_Data", index=False)
+                    results['wagons'].to_excel(writer, sheet_name="Wagon_Data", index=False)
+                    results['intervals'].to_excel(writer, sheet_name="Zone_Intervals", index=False)
+                    results['allocation'].to_excel(writer, sheet_name="Energy_Allocation", index=False)
+                    summary.to_excel(writer, sheet_name="Monthly_Summary", index=False)
+                    yearly.to_excel(writer, sheet_name="Yearly_Summary", index=False)
+                
+                with open(output_path, "rb") as f:
+                    st.download_button(
+                        label="📥 Download Complete Excel Report",
+                        data=f.read(),
+                        file_name="Dryer_KPI_Analysis.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True
+                    )
+                
+                st.success("✅ Analysis complete! Explore the visualizations above or download the full report.")
+                
+        except Exception as e:
+            st.error(f"❌ An error occurred during analysis: {str(e)}")
+            with st.expander("🔍 View Error Details"):
+                st.exception(e)
